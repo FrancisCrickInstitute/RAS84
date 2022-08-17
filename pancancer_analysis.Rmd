@@ -1,0 +1,907 @@
+---
+title: "Pancancer : Project 002"
+author: "philip.east@crick.ac.uk"
+date: 'Compiled: `r format(Sys.time(), "%d %B, %Y @ %H:%M:%S")`'
+output:
+  html_document:
+    df_print: tibble
+    toc: true
+    toc_depth: 5
+    toc_float: true
+    code_folding: hide
+    number_sections: yes
+---
+
+```{css setup_css, echo=FALSE}
+body .main-container {
+  max-width: 80%;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+Presented here is a pan-TCGA RAS activity analysis. First we calculate
+a RAS index value for each tumour (RAS84 signature mean) across a
+pan-TCGA normalised expression data set. Second we classify
+tumours, from each TCGA tumour cohort, into three RAS activity groups
+(RASsig_max, RASsig_1, and RASsig_0). The RAS index distributions for
+each tumour and each RAS activity group are shown below. We then
+explore the link between RAS activity and overall survival for each
+tumour type. The hypothesis being that RAS activty, in the more RAS
+driven tumours (where the signature is likely to be more effective), is more
+likely to correlate with overall survival. 
+
+```{r r_init,message=FALSE,warning=FALSE}
+library( affy )
+library( limma )
+library( org.Hs.eg.db )
+library( ggplot2 )
+library( reshape2 )
+library( scales )
+library( RColorBrewer )
+library( ComplexHeatmap )
+library( circlize )
+library( colorspace )
+library( GetoptLong )
+library( dendextend )
+library( matrixStats )
+library( DESeq2 )
+library( gplots )
+library( ggplot2 )
+library( gridExtra )
+library( tibble )
+library( dplyr )
+library( tidyr )
+library( gtable )
+library( openxlsx )
+library( survival )
+library( survminer )
+library( ggrepel )
+library( DT )
+library( broom )
+library( purrr )
+
+source( "/camp/stp/babs/working/eastp/code/R/R.packages.east01.functions.R")
+source( "../../scripts/lib.Ras_HighLow.335.R" )
+
+adat <- project.init( "results", root = "." )
+
+my_grey <- "#707173"
+my_red <- "#cc3333"
+my_orange <- "#ff9933"
+
+my_lightgreen <- "#adcf82"
+my_purple <- "#bb90bd"
+my_blue <- "#6699cc"
+
+plot_formatter <- function() {
+    theme_bw( ) +
+        theme( panel.grid.major = element_blank( ),
+               panel.grid.minor = element_blank( ),
+               panel.border = element_blank( ),
+               panel.background = element_blank( ),
+               #axis.line = element_line(color = "black"),
+               #axis.line.x = element_line(color="black", size = 0.1 ),
+               #axis.line.y = element_line(color="black", size = 0.1 ),
+               text = element_text( size = 10 ) )
+}
+```
+
+# Load metadata
+
+Load the RAS84 signature and the TCGA Pan-Cancer Oncogenic pathway
+alteration data and survival data from TCGA Pan-Cancer Immune
+Landscape paper. We also read in the curated survival data from
+[TCGA-CRD](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6066282/)
+project where they derive PFI values thay they show are more
+appropriate across more tumour types than OS.
+
+```{r project_init,message=FALSE,warning=FALSE}
+SIG_HOME <- file.path( "data", "signatures" )
+krasSigNames <- sub( "\\.csv", "", dir( SIG_HOME ) )
+signatures <- lapply( krasSigNames, function( sigFile ) {
+    read.table( file = file.path( SIG_HOME, paste( sigFile, "csv", sep = "." ) ),
+               sep = "\t", stringsAsFactors = FALSE )[, 1 ]
+} ) %>% setNames( make.names( krasSigNames ) )
+RAS84_signature_map <- read.xlsx( file.path( "data", "RAS84_feature_map.xlsx" ) )
+signatures$RAS4 <- RAS84_signature_map$TCGA_gene_symbol
+
+## Read in pan-cancer mutation data
+alt_altDatFile <- file.path( "data", "oncogenicRASPath_TCGA", "oncogenic_pathway_alteration_level_TCGA.txt" )
+alt_altDat <- read.table( file = alt_altDatFile, header = TRUE, sep = "\t" )
+colnames( alt_altDat )[ 1 ] <- "pancan_pathway"
+
+rasPathwayDefFile <- file.path( "data", "rasPathwayDefinition.txt" )
+rasPathwayTab <- read.delim( file = rasPathwayDefFile, sep = "\t" )
+
+rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
+                    tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
+rasGeneSets <- lapply( rasGeneSets, as.character )
+ras_pathway_genes <- unlist( rasGeneSets )
+
+## identify RAS pathway alterations
+alt_genes <- sapply( strsplit( colnames( alt_altDat )[ -1 ], "\\." ), '[[', 2 )
+rasAlts_f <- alt_genes %in% ras_pathway_genes
+rasAlts <- colnames( alt_altDat )[ -1 ][ rasAlts_f ]
+
+tcga_crd_dat <- read.xlsx( file.path( "data", "TCGA-pancancer_CDR_Lui_et_al_supptab1.xlsx" ),
+                           sheet = "ExtraEndpoints" )
+```
+
+# Read tumour expression data
+
+```{r read_tumour_data}
+se_l <- readRDS( file.path( "data", "se_l.rda" ) )    load( file = se_l_file )
+## remember to - assays( se_t )$zscore <- apply( assays( se_t )$vst, 2, function( x ) ( x - median( x ) )/ mad( x ) )
+
+se_pc <- readRDS( file.path( "data", "se_pancancer.rds" ) )
+```
+
+Here we calculate the mean RAS index for each tumour cohort. This
+will be used to order the tumours throughout this analysis. These
+values are shown in the barchart below.
+
+```{r ras_index,message=FALSE,warning=FALSE}
+sig_f <- rowData( se_pc )$gene_id %in% signatures$RAS84
+se_pc$ras_index_pc <- colMeans( assays( se_pc )$zscore[ sig_f, ] )
+```
+
+Shown here are the per-tumour cohort RAS index distributions. The
+first is the original plot where each point represents the RAS index
+value for a particular tumour and the red indicates an oncogenic RAS
+mutant (K,H,N). The second plot shows the RAS index distributions for
+each of the RAS activity groups (RASsigmax=red, RASsig_1=green,
+RASsig_0=blue). RAS mutants are highlighted by the black dots.
+
+## Per cohort RAS summary statistics
+
+Here we calculate RAS mutation percentages and mean RAS index values
+per cohort.
+
+```{r ras_index_data,message=FALSE,warning=FALSE,fig.height=8}
+plotdat_violin <- colData( se_pc ) %>%
+  as.data.frame( ) %>%
+    dplyr::select( barcode, tumour, ras_index_pc, rasact_3,
+                   MUT.KRAS, MUT.NRAS, MUT.HRAS, AMP.HRAS, AMP.KRAS ) %>%
+  mutate( mut_ras_type = ifelse( MUT.KRAS, "kras",
+                         ifelse( MUT.NRAS, "nras",
+                         ifelse( MUT.HRAS, "hras", "wt" ) ) ) ) %>%
+  mutate( MUT.RAS = mut_ras_type != "wt" ) %>%
+  mutate( AMP.RAS = AMP.HRAS | AMP.KRAS ) %>%
+  mutate( mut_ras_type = ifelse( MUT.RAS, mut_ras_type,
+                                ifelse( AMP.RAS, "amp", "wt" ) ) )
+plotdat_violin$MUT.RAS[ is.na( plotdat_violin$MUT.RAS ) ] <- FALSE
+
+ras_sumstats_dat <-  plotdat_violin %>%
+    group_by( tumour ) %>%
+    summarize( RASmut = ( sum( mut_ras_type  != "wt" )/n() ) * 100,
+               mean_ras_index = mean( ras_index_pc ),
+               median_ras_index = median( ras_index_pc ),
+              cases = n() ) %>%
+    ungroup( ) %>%
+    mutate( high_ras_mut = as.factor( RASmut > 7.5 ) ) %>%
+    arrange( mean_ras_index ) %>%
+    mutate( tumour = factor( tumour, levels = rev( tumour ) ) ) %>%
+    mutate( cuts = cut( mean_ras_index, 4,
+                       c( "q_lower", "q_2", "q_3", "q_upper" ),
+                       include.lowest = TRUE ) ) %>%
+    arrange( mean_ras_index ) %>%
+    mutate( tumour = factor( tumour, levels = tumour ) ) %>%
+    mutate( quartiles = cut( mean_ras_index,
+                            c( min( mean_ras_index ),
+                              quantile( mean_ras_index, c( 0.25, 0.5, 0.75 ) ),
+                              max( mean_ras_index ) ),
+                            c( "q_lower", "q_2", "q_3", "q_upper" ),
+                            include.lowest = TRUE ) ) %>%
+    as.data.frame( )
+
+plotdat_violin <- plotdat_violin %>%
+    mutate( tumour = factor( tumour, levels = levels( ras_sumstats_dat$tumour ) ) )
+```
+
+## Pancancer violin plot
+
+```{r violin}
+rasindex_means <- plotdat_violin %>%
+    group_by( tumour ) %>%
+    summarize( rasindex_mean = mean( ras_index_pc ) ) %>%
+    arrange( rasindex_mean )
+rasindex_means$tumour <- factor( rasindex_means$tumour, levels = rasindex_means$tumour )
+
+quartiles <- quantile( rasindex_means$rasindex_mean, c( 1/4, 3/4 ) )
+rasindex_means <- rasindex_means %>%
+    mutate( iqr = rasindex_mean > quartiles[ 1 ] & rasindex_mean < quartiles[ 2 ] ) %>%
+    as.data.frame( )
+
+gg_violin <- plotdat_violin %>%
+    mutate( mut_ras_type = ifelse( mut_ras_type == "amp", "wt", mut_ras_wt ) ) %>%
+    ggplot( aes( tumour, ras_index_pc,
+                         color = mut_ras_type ) ) +
+    geom_jitter( data = subset( plotdat, !MUT.RAS ),
+                size = 0.2, alpha = 0.5, width = 0.3 ) +
+    geom_jitter( data = subset( plotdat, MUT.RAS ),
+                 aes( reorder( tumour, ras_index_pc, mean ), ras_index_pc, color = mut_ras_type ),
+                size = 1, alpha = 0.8, width = 0.3 ) +
+    scale_colour_manual( values = c( my_blue, my_red, my_orange, "black" ) ) +
+    coord_flip( ) +
+    labs( x = "TCGA Tumour Type", y = "RAS Activity Index" ) +
+    plot_formatter( ) +
+    theme( legend.position = "none" ) 
+
+gg_violin
+
+gg_rasmut_bar <- plotdat_violin %>%
+    mutate( mut_ras_type = factor( mut_ras_type, levels = c( "wt", "amp", "kras", "nras", "hras" ) ) ) %>%
+    ggplot( aes( x = tumour, fill = mut_ras_type ) ) +
+    geom_bar( position = "fill" ) +
+    scale_y_continuous( labels = scales::percent_format( ) ) +
+    scale_fill_manual( values = c( "white", "grey", my_red, my_orange, my_blue ) ) +
+    coord_flip( ) +
+    theme_minimal() +
+    theme( axis.title.y = element_blank( ) ) +
+    theme( axis.title.y = element_blank( ),
+           axis.text.y = element_blank( ),
+           axis.ticks.y = element_blank( ) )
+   
+
+cairo_pdf( file = file.path( adat$plot.path, "pancancer_violin_isoRAS_withbar.pdf" ),
+     width = 9, height = 7 )
+cowplot::plot_grid( gg_violin, gg_rasmut_bar,
+                   align = "h", axis = "l", nrow = 1, rel_widths = c(0.8, 0.25 ) )
+dev.off()
+
+pdf( file = file.path( adat$plot.path, "pancancer_violin_isoRAS.pdf" ),
+     width = 5, height = 7 )
+gg_violin
+dev.off( )
+```
+
+## RAS index distributions
+
+Here we compare the RAS index distribution across tumour types. The violin plot below shows the distributions of the RAS index means. As observed
+ they fall into two groups indicated by the bimodal distribution. We split the tumour types into high ras and normal tumour groups. The high RAS 
+group contains four of the five most RAS mutated cohorts (>30%). 
+
+```{r ras_index_dist}
+d <- density( ras_sumstats_dat$mean_ras_index )
+
+png( file = file.path( adat$plot.path, "density.png" ), height = 300 )
+print( plot( d ) )
+dev.off( )
+
+max1_ind <- which.max( d$y )
+max1_x <- d$x[ max1_ind ]
+
+min1_f <- d$x > max1_x & d$x < 0.6
+min1_ind <- which.min( d$y[ min1_f ] )
+min1_x <- d$x[ min1_f ][ min1_ind ]
+
+max2_f <- d$x > min1_x & d$x < 0.7
+max2_ind <- which.max( d$y[ max2_f ] )
+max2_x <- d$x[ max2_f ][ max2_ind ]
+
+mean_RSI_gg <- ggplot( ras_sumstats_dat, aes( x = mean_ras_index ) ) +
+    geom_density( ) +
+    geom_vline( xintercept = c( max1_x, max2_x, min1_x ),
+               color = c( my_red, my_red, my_orange ) ) +
+    labs( x = "mean RSI / TCGA cohort", title = "" )
+
+cairo_pdf( file = file.path( adat$plot.path, "mean_ras_index_density.pdf" ),
+          width = 4, height = 4 )
+print( mean_RSI_gg )
+dev.off( )
+
+mean_ras_index_violin_dat <- ras_sumstats_dat %>%
+    arrange( RASmut ) %>%
+    mutate( RAS_tumour_group = ifelse( mean_ras_index > 0.53, "high_ras_tumour", "tumour" ) )
+
+high_RAS_tumour_group <- mean_ras_index_violin_dat %>%
+    filter( RAS_tumour_group == "high_ras_tumour" ) %>%
+    arrange( desc( RASmut ) ) %>%
+    pull( tumour ) %>%
+    as.character( )
+
+mean_ras_index_violin_gg <- ggplot( mean_ras_index_violin_dat,
+                                   aes( x = "tumour", y = mean_ras_index,
+                                        color = RASmut, size = RASmut ) ) +
+    geom_violin( ) +
+    geom_point( size = 4 ) +
+    scale_colour_gradient( low = "grey", high = "#cc3333" ) +
+    geom_hline( yintercept = 0.53, color = my_orange, linetype = "dotted", size = 2 ) +
+    geom_text_repel( data = subset( mean_ras_index_violin_dat, RASmut > 30 ),
+                    aes( x = "tumour", y = mean_ras_index,
+                         label = tumour, color = RASmut ),
+                    inherit.aes = FALSE, nudge_x = 0.5, size = 3 ) +
+    plot_formatter( ) +
+    labs( x = "", y = "mean ras index" )
+
+cairo_pdf( file = file.path( adat$plot.path, "mean_ras_index_violin.pdf" ),
+          width = 2.5, height = 5 )
+print( mean_ras_index_violin_gg )
+dev.off( )
+
+RAS_mutation_ratio_gg <- ggplot( ras_sumstats_dat, aes( x = RASmut/100 ) ) +
+    geom_density( ) +
+    geom_point( data = ras_sumstats_dat, aes( x = RASmut/100, y = 0 ) ) +
+    geom_text_repel( data = subset( ras_sumstats_dat, RASmut > 30 ),
+                    aes( x = RASmut/100, y = 0, label = tumour ),
+                    nudge_y = 1, size = 2 ) +
+    theme( panel.grid.major = elemresent_blank( ),
+          panel.grid.minor = element_blank( ),
+          panel.border = element_blank( ),
+          panel.background = element_blank( ),
+          text = element_text( size = 10 ) ) +
+    labs( x = "RAS mutation ratio" )
+cairo_pdf( file = file.path( adat$plot.path, "RAS_mutation_ratio_distribution.pdf" ),
+          width = 4, height = 3 )
+print( RAS_mutation_ratio_gg )
+dev.off( )
+```
+
+## Over-represented mutations in high RAS tumour group
+
+Here we use a hypergeometric test to determine which mutations are over-represented in the high RAS tumour group defined above.
+
+With reference to the phyper() function
+
+x = The number of mutated samples in high group.
+m = The total number of mutated samples in the cohort.
+n = The total number of wt (unmatated) samples in the cohort.
+k = The umber of samples in the high group.
+
+We remove mutations with less that 20 counts across the pancancer cohort.
+
+```{r phyper_muts}
+mut_cols <- colnames( alt_altDat )[ -1 ]
+f <- colSums( as.data.frame( colData( se_pc )[, mut_cols ] ) ) > 20
+f[ is.na( f ) ] <- FALSE
+mut_cols <- mut_cols[ f ]
+alt_phyper_pval <- lapply( mut_cols, function( mut ) {
+    mut_dat <- colData( se_pc ) %>%
+        as.data.frame( ) %>%
+        mutate_( mutation = mut ) %>%
+        mutate( high_RAS_tumours = ifelse( tumour %in% high_RAS_tumour_group, "high_RAS_tumour", "normal_RAS_tumour" ) ) %>%
+        group_by( high_RAS_tumours ) %>%
+        summarise( k = n(), x = sum( mutation ) )
+    x <- mut_dat %>%
+        filter( high_RAS_tumours == "high_RAS_tumour" ) %>%
+        pull( x )
+    k <- mut_dat %>%
+        filter( high_RAS_tumours == "high_RAS_tumour" ) %>%
+        pull( k )
+    n <- mut_dat %>%
+        filter( high_RAS_tumours == "normal_RAS_tumour" ) %>%
+        pull( k )
+    m <- mut_dat %>%
+        summarise( m = sum( x ) ) %>%
+        pull( m )
+    data.frame( mut = mut,
+               x = x, k = k, n = n, m = m,
+               pval = phyper( x, m, n, k, lower.tail = FALSE ) )
+} )
+
+alt_phyper_res <- bind_rows( alt_phyper_pval ) %>%
+    mutate( fdr = p.adjust( pval ) ) %>%
+    arrange( pval ) %>%
+    filter( fdr < 0.05 )
+write.xlsx( alt_phyper_res, file = file.path( adat$analysis.path, "alt_phyper_res_high_ras_tumour_group.xlsx" ) )
+```
+
+# RAS alteration correlation with RAS index
+
+Here we look at the correlation between mean RAS index and RAS alteration status across the cohorts. We look at RAS mutation (all three isoforms), RAS mutation and amplification (all three isoforms) and RAS pathway (any RAS pathway alteration).
+
+## RAS mutation status
+
+Correlation between mean RAS index and RAS mutation percentage across the cohorts.
+
+```{r ras_mut_burden}
+plotdat_rasmutburden <- lapply( se_l, function( se ) {
+    ras_mut <- colData( se ) %>%
+        as.data.frame( ) %>%
+        mutate( MUT.RAS = MUT.KRAS | MUT.HRAS | MUT.NRAS | AMP.KRAS | AMP.HRAS ) %>%
+        pull( MUT.RAS )
+    data.frame( RAS_mut_burden = sum( ras_mut ) / length( ras_mut ),
+                mean_ras_index = mean( se$ras_index) )
+} ) %>% bind_rows( .id = "tumour" )
+
+gg <- ggplot( plotdat_rasmutburden, aes( x = mean_ras_index, y = RAS_mut_burden ) ) +
+    geom_point()
+gg
+```
+
+## RAS pathway alteration status
+
+Here we calculate the overall RAS pathway alteration burden per
+sample. RAS pathway membership is defined in the pancancer cell paper. We remove cohorts with less than 100 samples.
+
+```{r ras_pathway_alt}
+ras_pathway_cols <- lapply( ras_pathway_genes, function( g ) {
+    colData( se_l[[ 1 ]] ) %>%
+        as.data.frame( ) %>%
+        dplyr::select( contains( g, ignore.case = FALSE ) )
+} ) %>% bind_cols( ) %>% colnames( )
+
+ras_pathway_alt <- lapply( se_l,  function( se ) {
+    print( se$tumour[ 1 ] )
+    ras_pathway_muts <- colData( se ) %>%
+        as.data.frame( ) %>%
+        dplyr::select( ras_pathway_cols )
+    sum( rowSums( ras_pathway_muts ) > 0 ) / nrow( ras_pathway_muts )
+} ) %>% melt( ) %>%
+    rename( tumour = L1 ) %>%
+    rename( ras_alt_ratio = value )
+
+cor_dat <- ras_pathway_alt %>%
+    left_join( ras_sumstats_dat, by = "tumour" ) %>%
+    left_join( mean_ras_index_violin_dat[, c( "tumour", "RAS_tumour_group" ) ], by = "tumour" ) %>%
+    mutate( tumour = sub( "TCGA-", "", tumour ) )
+
+cor_res <- cor.test( cor_dat$mean_ras_index, cor_dat$ras_alt_ratio, )
+
+fit <- lm( mean_ras_index ~ ras_alt_ratio, data = cor_dat )
+p1 <- predict( fit, interval = "confidence", level=0.99 )
+
+cor_dat$outlier <- cor_dat$mean_ras_index<p1[,2] | cor_dat$mean_ras_index>p1[,3]
+
+residuals_df <- data.frame( res_ids = residuals( fit ),
+                            tumour = cor_dat$tumour ) %>%
+    mutate( sd = res_ids * sd( res_ids )  ) %>%
+    mutate( mad = res_ids * mad( res_ids )  ) %>%
+    arrange( mad )
+
+resids_vio_gg <- ggplot( residuals_df, aes( x = 1, y = res_ids, label = tumour ) ) +
+    geom_boxplot( ) +
+    geom_point( ) +
+    geom_text( )
+png( file = file.path( adat$plot.path, "resids_violin.png" ), width = 250 )
+print( resids_vio_gg )
+dev.off( )
+
+resids_den_gg <- ggplot( residuals_df, aes( x = res_ids, label = tumour ) ) +
+    geom_density( ) +
+    geom_point( y = 0 ) +
+    geom_text( y = 0 )
+png( file = file.path( adat$plot.path, "resids_density.png" ), width = 250 )
+print( resids_den_gg )
+dev.off( )
+
+gg <- ggplot( cor_dat, aes( x =  mean_ras_index, y = ras_alt_ratio,
+                            label = tumour ) ) +
+    geom_smooth( method = "lm", level = 0.99 ) +
+    geom_point( data = cor_dat, aes(  x = mean_ras_index, y = ras_alt_ratio,
+                                    color = RAS_tumour_group ) ) +
+    geom_text_repel( size = 3 ) +
+    scale_color_manual( values = c( my_red, my_grey ) ) +
+    plot_formatter( ) +
+    labs( x = "mean RAS index", y = "RAS pathway alteration ratio" ) +
+    theme( legend.position = "none" )
+
+cairo_pdf( file = file.path( adat$plot.path, "ras_burden_vs_ras_index_scatter.pdf" ),
+          width = 4, height = 3 )
+print( gg )
+dev.off( )
+```
+
+## RAS mutant RAS index plots
+
+Plotted here are the percentage RAS mutants per tumour cohort.
+
+```{r rasmut_rasindex_plots,eval=FALSE}
+gg <- ggplot( rasmut_dat, aes( x = RASmut ) ) +
+    geom_density( ) +
+    xlim( c( 0, 20 ) ) +
+    labs( x = "% RAS mutant" )
+gg
+
+gg_rascount <- ggplot( plotdat, aes( x = tumour, fill = MUT.RAS ) ) +
+    geom_bar() +
+    scale_fill_manual( values = c( my_grey, my_red ) ) +
+    plot_formatter( ) +
+    theme( axis.text.x = element_text( angle = 90, hjust = 1 ) )
+gg_rascount
+
+cairo_pdf( file = file.path( adat$plot.path, "RASmut_count_barplot.pdf" ),
+          width = 6, height = 3 )
+gg_rascount
+dev.off()
+```
+
+## RAS pathway member mutation correlation with RAS index
+
+Here we run a wilcox test to determine if there is a significant association between RAS mutation status and ras index.
+
+# RAS pathway alterations
+
+Here we look at RAS index distributions across RAS pathway mutation
+status. We use the RAS pathway membership definition from the
+oncogenic alterations TCGA Cell paper references above. This is to
+determine if any oncogenic RAS pathway driver correlates with RAS84
+signature activity.
+
+```{r alteration_alt,fig.width=8}
+alt_alteration <- read.delim( file = file.path( "..", "..", "data", "oncogenicRASPath_TCGA", "oncogenic_pathway_alteration_level_TCGA.txt" ), stringsAsFactors = FALSE ) %>%
+    rename( pancan_pathway = SAMPLE_BARCODE )
+
+alt_alteration_df <- colData( se_pc ) %>%
+    as.data.frame( ) %>%
+    dplyr::select( tumour, "ras_index", pancan_pathway ) %>%
+    left_join( alt_alteration, by = "pancan_pathway" ) %>%
+    tidyr::gather( alteration, present, -ras_index, -tumour, -pancan_pathway ) %>%
+    group_by( tumour, alteration ) %>% 
+    mutate( prevalence = sum( present ) / n() ) %>%
+    filter( prevalence > 0.05 ) %>%
+    mutate( key = paste( tumour, alteration, sep = "_" ) ) %>%
+    ungroup( ) %>%
+    mutate( present = factor( present, levels = c( "TRUE", "FALSE" ) ) )
+
+wilcox_fit_alteration <- alt_alteration_df %>%
+    nest( -alteration, -tumour ) %>%
+    mutate(
+        fit = map( data, ~ wilcox.test( ras_index ~ present, data = .x ) ),
+        tidied = map( fit, tidy ) ) %>% 
+    unnest( tidied ) %>%
+    mutate( padj = p.adjust( p.value, method = "fdr" ) ) %>%
+    filter( padj < 0.01 ) %>%
+    arrange( tumour ) %>%
+    dplyr::select( -data, -fit, -method, -alternative ) %>%
+    mutate( key = paste( tumour, alteration, sep = "_" ) ) %>%
+    separate( alteration, c( "mutation_type", "gene" ), sep = "\\.", remove = FALSE ) %>%
+    mutate( ras_pathway = gene %in% ras_pathway_genes ) %>%
+    arrange( desc( ras_pathway ) )
+
+DT::datatable( wilcox_fit_alteration )
+```
+
+```{r gene_alt,fig.width=8}
+alt_gene <- read.delim( file = file.path( "..", "..", "data", "oncogenicRASPath_TCGA", "oncogenic_pathway_gene_level_TCGA.txt" ), stringsAsFactors = FALSE ) %>%
+    rename( pancan_pathway = SAMPLE_BARCODE )
+
+alt_gene_df <- colData( se_pc ) %>%
+    as.data.frame( ) %>%
+    dplyr::select( tumour, "ras_index_pc", pancan_pathway ) %>%
+    left_join( alt_gene, by = "pancan_pathway" ) %>%
+    tidyr::gather( gene, present, -ras_index_pc, -tumour, -pancan_pathway ) %>%
+    group_by( tumour, gene ) %>% 
+    mutate( prevalence = sum( present ) / n() ) %>%
+    filter( prevalence > 0.05 ) %>%
+    mutate( key = paste( tumour, gene, sep = "_" ) ) %>%
+    ungroup( ) %>%
+    mutate( present = factor( present, levels = c( "1", "0" ) ) )
+
+wilcox_fit_gene <- alt_gene_df %>%
+    nest( -gene, -tumour ) %>%
+    mutate(
+        fit = map( data, ~ wilcox.test( ras_index_pc ~ present, data = .x ) ),
+        tidied = map( fit, tidy ) ) %>% 
+    unnest( tidied ) %>%
+    mutate( padj = p.adjust( p.value, method = "fdr" ) ) %>%
+    filter( padj < 0.05 ) %>%
+    arrange( tumour ) %>%
+    dplyr::select( -data, -fit, -method, -alternative, -statistic ) %>%
+    mutate( key = paste( tumour, gene, sep = "_" ) ) %>%
+    mutate( ras_pathway = gene %in% ras_pathway_genes ) %>%
+    arrange( desc( ras_pathway ) )
+
+gene_lfc <- alt_gene_df %>%
+    filter( key %in% wilcox_fit_gene$key ) %>%
+    mutate( tumour = factor( tumour, levels = rev( rasindex_means$tumour ) ) ) %>%
+    droplevels( ) %>%
+    group_by( key, present ) %>%
+    summarize( mean_ras_index = mean( ras_index_pc ) ) %>%
+    spread( present, mean_ras_index ) %>%
+    mutate( lfc = `1` - `0` ) %>%
+    arrange( desc( lfc ) )
+    
+plotdat_gene <- alt_gene_df %>%
+    filter( key %in% wilcox_fit_gene$key ) %>%
+    filter( gene %in% ras_pathway_genes ) %>%
+    mutate( tumour = factor( tumour, levels = rev( rasindex_means$tumour ) ) ) %>%
+    droplevels( ) %>%
+    arrange( tumour ) %>%
+    mutate( key = factor( key, levels =  unique( key ) ) )
+
+rec_ind <- data.frame( xmin = seq( from = 1.5, to = nlevels( plotdat$key ), by = 2 ),
+                       ymin = -0.2,
+                       ymax = 1.05 )
+rec_ind$xmax = rec_ind$xmin + 1
+
+dodge <- position_dodge( width = 0.6 )
+
+alt_gene_gg <- ggplot( ) +
+    geom_rect( data = rec_ind, aes( xmin = xmin, xmax = xmax,
+                                    ymin = ymin, ymax = ymax ),
+              fill = 'gray80', alpha = 0.5 ) +
+    scale_shape_identity() +
+    scale_x_discrete( labels = levels( plotdat$key ) ) +
+    #geom_violin( data = plotdat, aes( x = key, y = ras_index_pc, fill = present ),
+    #             position = dodge, width = 1.2 ) +
+    geom_boxplot( data = plotdat, aes( x = key, y = ras_index_pc, color = present ),
+                 position = dodge, width = 0.3 ) +
+    scale_colour_manual( values = c( my_red, my_grey ) ) +
+    plot_formatter( ) +
+    theme( axis.text.x = element_text( angle = 90, hjust = 1 ),
+           text = element_text( size = 8 ) )
+
+print( alt_gene_gg )
+
+pdf( file = file.path( adat$plot.path, "violinplot_gene.pdf" ),
+    width = 7, height = 4 )
+print( alt_gene_gg )
+dev.off()
+
+#gene_volc_gg <- wilcox_fit_gene %>%
+#    left_join( pathway_lfc, by = "key" ) %>%
+#    separate( key, c( "tumour", "gene" ), sep = "_" ) %>%
+#    ggplot( aes( x = lfc, y = -log10( p.value ), color = gene ) ) +
+#    geom_point( size = 2 )
+#png( file = file.path( adat$plot.path, "volcanoplot_gene.png" ) )
+#print( pathway_volc_gg )
+#dev.off()
+
+DT::datatable( wilcox_fit_gene )
+```
+
+```{r onco_pathway}
+alt_pathway <- read.delim( file = file.path( "..", "..", "data", "oncogenicRASPath_TCGA", "oncogenic_pathway_pathway_level_TCGA.txt" ), stringsAsFactors = FALSE ) %>%
+    rename( pancan_pathway = SAMPLE_BARCODE )
+
+pathway_alt_df <- colData( se_pc ) %>%
+    as.data.frame( ) %>%
+    dplyr::select( tumour, "ras_index", pancan_pathway ) %>%
+    left_join( alt_pathway, by = "pancan_pathway" ) %>%
+    tidyr::gather( pathway, present, -ras_index, -tumour, -pancan_pathway ) %>%
+    group_by( tumour, pathway ) %>% 
+    mutate( prevalence = sum( present ) / n() ) %>%
+    filter( prevalence > 0.05 ) %>%
+    mutate( key = paste( tumour, pathway, sep = "_" ) ) %>%
+    ungroup( ) %>%
+    mutate( present = factor( present, levels = c( "1", "0" ) ) )
+
+wilcox_fit_pathway <- pathway_alt_df %>%
+    nest( -pathway, -tumour ) %>%
+    mutate(
+        fit = map( data, ~ wilcox.test( ras_index ~ present, data = .x ) ),
+        tidied = map( fit, tidy ) ) %>% 
+    unnest( tidied ) %>%
+    mutate( padj = p.adjust( p.value, method = "fdr" ) ) %>%
+    filter( padj < 0.05 ) %>%
+    arrange( pathway ) %>%
+    dplyr::select( -data, -fit, -method, -alternative ) %>%
+    mutate( key = paste( tumour, pathway, sep = "_" ) )
+
+pathway_lfc <- pathway_alt_df %>%
+    filter( key %in% wilcox_fit_pathway$key ) %>%
+    mutate( tumour = factor( tumour, levels = rev( rasindex_means$tumour ) ) ) %>%
+    droplevels( ) %>%
+    group_by( key, present ) %>%
+    summarize( mean_ras_index = mean( ras_index ) ) %>%
+    spread( present, mean_ras_index ) %>%
+    mutate( lfc = `1` - `0` ) %>%
+    arrange( desc( lfc ) )
+    
+dodge <- position_dodge( width = 1 )
+
+plotdat <- pathway_alt_df %>%
+    filter( key %in% wilcox_fit_pathway$key ) %>%
+    mutate( tumour = factor( tumour, levels = rev( rasindex_means$tumour ) ) ) %>%
+    droplevels( ) %>%
+    arrange( tumour ) %>%
+    mutate( key = factor( key, levels =  unique( key ) ) )
+
+pathway_alt_gg <- ggplot( plotdat, aes( x = tumour, y = ras_index, color = present ) ) +
+    geom_violin( position = dodge ) +
+    geom_boxplot( position = dodge, width = 0.3 ) +
+    facet_grid( 1 ~ pathway, space = "free", scale = "free" ) +
+    scale_colour_manual( values = c( my_red, my_grey ) ) +
+    theme( axis.text.x = element_text( angle = 90, hjust = 1 ) ) +
+    plot_formatter( ) +
+    theme( axis.text.x = element_text( angle = 90, hjust = 1 ) )
+
+print( pathway_alt_gg )
+
+png( file = file.path( adat$plot.path, "violinplot_pathway.png" ),
+    width = 1200 )
+print( pathway_alt_gg )
+dev.off()
+
+pathway_volc_gg <- wilcox_fit_pathway %>%
+    left_join( pathway_lfc, by = "key" ) %>%
+    separate( key, c( "tumour", "pathway" ), sep = "_" ) %>%
+    ggplot( aes( x = lfc, y = -log10( p.value ), color = pathway ) ) +
+    geom_point( size = 2 )
+png( file = file.path( adat$plot.path, "volcanoplot_pathway.png" ) )
+print( pathway_volc_gg )
+dev.off()
+```
+
+```{r rasmut_rasindex}
+plotdat <- colData( se_pc ) %>%
+    as.data.frame( ) %>%
+    dplyr::select( barcode, tumour, ras_index_pc, rasact_3, MUT.KRAS, MUT.NRAS, MUT.HRAS ) %>%
+    mutate( mut_ras_type = ifelse( MUT.KRAS, "kras",
+                           ifelse( MUT.NRAS, "nras",
+                           ifelse( MUT.HRAS, "hras", "wt" ) ) ) ) %>%
+    mutate( MUT.RAS = mut_ras_type != "wt" )
+plotdat$MUT.RAS[ is.na( plotdat$MUT.RAS ) ] <- FALSE
+
+rasmut_rasind_dat_l <- split( plotdat, plotdat$tumour )
+res_l <- lapply( rasmut_rasind_dat_l, function( dat ) {
+    if( sum( dat$MUT.RAS ) > 5 ) {
+        wt <- wilcox.test( ras_index_pc ~ MUT.RAS, dat )
+        logfc <- dat %>%
+            group_by( MUT.RAS ) %>%
+            summarize( mean = mean( ras_index_pc ) )
+        data.frame( pval = wt$p.value,
+           logFC = ( logfc$mean[ 2 ] - logfc$mean[ 1 ] ) )
+    }
+} )
+
+res <- bind_rows( res_l[ !unlist( lapply( res_l, is.null ) ) ],
+                 .id = "tumour" ) %>%
+    mutate( fdr = p.adjust( pval ) ) %>%
+    mutate( significant = fdr < 0.05 )
+
+gg_vol <- ggplot( res, aes( x = logFC, y = -log10( pval ),
+                            color = significant, label = tumour ) ) +
+    geom_point( ) +
+    geom_text_repel( data = subset( res, significant ) ) +
+    geom_vline( xintercept = 0, color = "black", linetype = "dotted" ) +
+    scale_colour_manual( values = c( my_grey, my_red ) ) +
+    plot_formatter( ) +
+    theme( axis.line = element_line( color = "black" ),
+           legend.position = "none" ) +
+    labs( color = "RAS pathway driver", x = "OS coefficient", y = "-log10( p-value )" )
+gg_vol
+
+cairo_pdf( file = file.path( adat$plot.path, "rasindex_rasmut_vol.pdf" ),
+          width = 4, height = 4 )
+print( gg_vol )
+dev.off( )
+
+write.xlsx( res, file = file.path( adat$analysis.path, "rasindex_rasmut_wilcox.xlsx" ) )
+DT::data.table( res )
+
+decide <- bind_rows( res_l[ !unlist( lapply( res_l, is.null ) ) ],
+                    .id = "tumour" ) %>%
+    mutate( fdr = p.adjust( pval ) ) %>%
+    filter( fdr < 0.05 )
+```
+
+## RAS mutation RAS index boxplots
+
+```{r rasindex_rasmut_boxplots}
+gg_box_dat <- bind_rows( rasmut_rasind_dat_l ) %>%
+    filter( tumour %in% decide$tumour ) %>%
+    mutate( tumour = sub( "TCGA-", "", tumour ) ) %>%
+    mutate( tumour = factor( tumour, levels = c( "PAAD", "HNSC", "STAD", "LUAD",
+                                                "UCEC", "BRCA", "UCS", "THYM",
+                                                "THCA", "TGCT" ) ) )
+
+rec_ind <- data.frame( xmin = seq( from = 1.5, to = nlevels( gg_box_dat$tumour ), by = 2 ),
+                       ymin = -0.2,
+                       ymax = 1 )
+rec_ind$xmax = rec_ind$xmin + 1
+
+xlabs <- levels( gg_box_dat$tumour )
+names( xlabs ) <- 1:nlevels(  gg_box_dat$tumour )
+
+gg_box <- ggplot( ) +
+    geom_rect( data = rec_ind, aes( xmin = xmin, xmax = xmax,
+                                    ymin = ymin, ymax = ymax ),
+              fill = 'gray80', alpha = 0.5 ) +
+    scale_shape_identity() +
+    scale_x_discrete( labels = xlabs ) +
+    geom_boxplot( data = gg_box_dat,
+                 aes( x = tumour, y = ras_index_pc, color = MUT.RAS ),
+                 position = position_dodge( 0.75 ),
+                 width = 0.5 ) +
+    theme( axis.text.x = element_text( angle = 90, hjust = 1 ) ) +
+    labs( y = "mean RAS index", x = "TCGA cohort" ) +
+    scale_colour_manual( values = c( my_grey, my_red ) ) +
+    coord_cartesian( ylim = c( 0, 1.1 ) ) + 
+    plot_formatter( ) +
+    theme( axis.text.x = element_text( angle = 90, hjust = 1 ) )
+
+cairo_pdf( file = file.path( adat$plot.path, "rasindex_rasmut_boxplots.pdf" ),
+                             width = 7, height = 5 )
+print( gg_box )
+dev.off( )
+```
+
+# BRAF test in SKCM & THCA
+
+```{r braf}
+plotdat <- colData( se_pc ) %>%
+    as.data.frame( ) %>%
+    filter( tumour %in% c( "TCGA-SKCM", "TCGA-THCA" ) ) %>%
+    mutate( tumour = factor( tumour, levels = c( "TCGA-THCA", "TCGA-SKCM" ) ) ) %>%
+    select( tumour, MUT.BRAF, ras_index_pc ) %>%
+    mutate( MUT.BRAF = factor( MUT.BRAF ) )
+
+rec_ind <- data.frame( xmin = seq( from = 1.5, to = nlevels( plotdat$tumour ), by = 2 ),
+                       ymin = -0.2,
+                       ymax = 1 )
+rec_ind$xmax = rec_ind$xmin + 1
+
+xlabs <- levels( plotdat$tumour )
+names( xlabs ) <- 1:nlevels( plotdat$tumour )
+
+gg_box <- ggplot( ) +
+    geom_rect( data = rec_ind, aes( xmin = xmin, xmax = xmax,
+                                    ymin = ymin, ymax = ymax ),
+              fill = 'gray80', alpha = 0.5 ) +
+    scale_shape_identity() +
+    scale_x_discrete( labels = xlabs ) +
+    geom_boxplot( data = plotdat,
+                 aes( x = tumour, y = ras_index_pc, color = MUT.BRAF ),
+                 position = position_dodge( 0.75 ),
+                 width = 0.5 ) +
+    theme( axis.text.x = element_text( angle = 90, hjust = 1 ) ) +
+    labs( y = "mean RAS index", x = "TCGA cohort" ) +
+    scale_colour_manual( values = c( my_grey, my_red ) ) +
+    coord_cartesian( ylim = c( 0, 1.1 ) ) + 
+    plot_formatter( ) +
+    theme( axis.text.x = element_text( angle = 90, hjust = 1 ) )
+
+wt_braf_thca <- wilcox.test( ras_index_pc ~ MUT.BRAF, filter( plotdat, tumour == "TCGA-THCA" ) )
+wt_braf_skcm <- wilcox.test( ras_index_pc ~ MUT.BRAF, filter( plotdat, tumour == "TCGA-SKCM" ) )
+
+cairo_pdf( file = file.path( adat$plot.path, "brafmut_rasindex.pdf" ),
+         width = 4, height = 4 )
+print( gg_box )
+dev.off( )
+```
+
+# PIK3CA test in CESC
+
+```{r pik3ca}
+plotdat <- colData( se_pc ) %>%
+    as.data.frame( ) %>%
+    filter( tumour %in% c( "TCGA-CESC" ) ) %>%
+    select( tumour, MUT.PIK3CA, AMP.PIK3CA, ras_index_pc ) %>%
+    mutate( BOTH.PIK3CA = MUT.PIK3CA | AMP.PIK3CA ) %>%
+    mutate( MUT.PIK3CA = factor( MUT.PIK3CA ) ) %>%
+    mutate( BOTH.PIK3CA = factor( BOTH.PIK3CA ) )
+
+wt_pik3ca_cesc <- list( AMP.PIK3CA = wilcox.test( ras_index_pc ~ AMP.PIK3CA, plotdat ),
+                       MUT.PIK3CA = wilcox.test( ras_index_pc ~ MUT.PIK3CA, plotdat ),
+                       BOTH.PIK3CA = wilcox.test( ras_index_pc ~ BOTH.PIK3CA, plotdat ) )
+
+plotdat <- plotdat %>%
+    gather( variant, present, -ras_index_pc, -tumour ) %>%
+    mutate( variant = factor( variant, levels = c( "MUT.PIK3CA", "AMP.PIK3CA", "BOTH.PIK3CA" ) ) )
+
+rec_ind <- data.frame( xmin = seq( from = 1.5, to = nlevels( plotdat$variant ), by = 2 ),
+                       ymin = 0.25,
+                       ymax = 1.05 )
+rec_ind$xmax = rec_ind$xmin + 1
+
+xlabs <- levels( plotdat$variant )
+names( xlabs ) <- 1:nlevels( plotdat$variant )
+
+gg_box <- ggplot( ) +
+    geom_rect( data = rec_ind, aes( xmin = xmin, xmax = xmax,
+                                    ymin = ymin, ymax = ymax ),
+              fill = 'gray80', alpha = 0.5 ) +
+    scale_shape_identity() +
+    scale_x_discrete( labels = xlabs ) +
+    geom_boxplot( data = plotdat,
+                 aes( x = variant, y = ras_index_pc, color = present ),
+                 position = position_dodge( 0.75 ),
+                 width = 0.5 ) +
+    theme( axis.text.x = element_text( angle = 90, hjust = 1 ) ) +
+    labs( y = "mean RAS index", x = "PIK3CA variant" ) +
+    scale_colour_manual( values = c( my_grey, my_red ) ) +
+    plot_formatter( ) +
+    theme( axis.text.x = element_text( angle = 90, hjust = 1 ) )
+
+cairo_pdf( file = file.path( adat$plot.path, "pik3ca_mut_rasindex_TCGA-CESC.pdf" ),
+         width = 4, height = 4 )
+print( gg_box )
+dev.off( )
+```

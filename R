@@ -1,0 +1,5 @@
+#!/bin/sh
+
+ml purge
+ml R/3.6.0-foss-2016b-BABS
+R

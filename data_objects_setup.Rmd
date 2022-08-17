@@ -1,0 +1,727 @@
+---
+title: "Initialization of RAS84 analysis data objects"
+author: "philip.east@crick.ac.uk"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE,message=FALSE,warning=FALSE)
+```
+
+```{r r_init}
+library( biomaRt )
+library( affy )
+library( DESeq2 )
+library( tidyverse )
+library( GEOquery )
+library( DT )
+library( ggrepel )
+library( openxlsx )
+```
+
+```{r variable_init}
+DATA_HOME="data"
+
+CCLE_AFFY_EXPRESSION_FILE <- "CCLE_Expression_Entrez_2012-09-29.gct"
+CCLE_RNASEQ_EXPRESSION_FILE <- "CCLE_RNAseq_rsem_genes_tpm_20180929.txt.gz"
+CCLE_ONCOMAP_MAF_FILE <- "CCLE_Oncomap3_2012-04-09.maf"
+CCLE_MUTATION_DATA_FILE <- "CCLE_DepMap_18q3_maf_20180718.txt"
+CCLE_AFFY_ESET_FILE <- "CCLE_Affy_eSet.rds"
+CCLE_RNASEQ_SE_FILE <- "CCLE_rnaseq_se.rds"
+
+ONCOGENIC_DRIVER_MUTATION_FILE <- "1-s2.0-S009286741830237X-mmc1.xlsx"
+ONCOGENIC_RAS_PATHWAY_DEFINTION_FILE <- "oncogenic_RAS_pathway_defintions_Sanchez-Vega_etal.txt"
+CELL_IMMUNE_LANDSCAPE_FILE <- "1-s2.0-S1074761318301213-mmc2.txt"
+
+GDSC1_DATA_FILE <- "GDSC1_fitted_dose_response_25Feb20.xlsx"
+GDSC1_MUTATION_FILE <- "GDSC1_PANCANCER_Genetic_feature_variant_Wed_Sep_23_15_15_06_2020.csv"
+GDSC2_DATA_FILE <- "GDSC2_fitted_dose_response_25Feb20.xlsx"
+
+CTRPv1_DATA_FILE <- file.path( "CTRPv1", "v10.D3.area_under_conc_curve.txt" )
+CTRPv1_CELL_FILE <- file.path( "CTRPv1", "v10.M2.cell_line_info.txt" )
+CTRPv1_DRUG_FILE <- file.path( "CTRPv1", "v10.M1.informer_set.txt" )
+CTRPv1_SE_FILE <- "CTRPv1_se.rds"
+
+CTRPv2_DATA_FILE <- file.path( "CTRPv2", "v20.meta.per_experiment.txt" )
+CTRPv2_CELL_FILE <- file.path( "CTRPv2", "v20.meta.per_cell_line.txt" )
+CTRPv2_DRUG_FILE <- file.path( "CTRPv2", "v20.meta.per_compound.txt" )
+CTRPv2_CURVES_FILE <- file.path( "CTRPv2", "v20.data.curves_post_qc.txt" )
+CTRPv2_SE_FILE <- "CTRPv2_se.rds"
+
+GDSC_SE_L_FILE <- "gdsc_se_l.rds"
+
+UPPSALA_RNASEQ_EXPRESSION_FILE <- "GSE81089_se.rds"
+UPPSALA_RNASEQ_EXPRESSION_DATA_FILE <- "GSE81089_readcounts_featurecounts.tsv"
+
+KOREAN_EXPRESSION_FILE <- "GSE40419_eSet.rds"
+KOREAN_EXPRESSION_DATA_FILE <- "GSE40419_LC-87_RPKM_expression.txt"
+KOREAN_MUTATION_DATA_FILE <- "GSE40419_SuppTable3.xlsx"
+
+TCGA_HOME <- file.path( "data", "tcga" )
+PANCANCER_TCGA_FILE <- "pancancer_se.rds"
+
+ensembl <- useMart( "ensembl", dataset = "hsapiens_gene_ensembl" )
+```
+
+# Introduction
+
+* CCLE Affymetrix expression data.
+* CCLE RNA-seq expression data.
+* GDSC & CTRP cancer cell line drug screen data.
+* TCGA pan-cancer expression data.
+* RPPA TCGA proteomic data.
+* Curated TCGA clinical labels from -
+* Oncogenic pathway definitions from - [Oncogenic Signaling Pathways in
+The Cancer Genome Atlas](https://www.sciencedirect.com/science/article/pii/S0092867418303593?via%3Dihub).
+* Cancer drive mutations from - [Comprehensive Characterization of Cancer Driver Genes and Mutations](https://www.sciencedirect.com/science/article/pii/S009286741830237X?via%3Dihub).
+* Uppsala cohort expression and clinical data.
+
+
+# Oncogenic mutation data
+
+We downloaded oncogenic mutation data from [Oncogenic Signaling Pathways in
+The Cancer Genome
+Atlas](https://www.sciencedirect.com/science/article/pii/S0092867418303593?via%3Dihub).
+
+```{r oncogenic_driver_mutation_data}
+oncogenic_mutation_data <- read.xlsx( file.path( DATA_HOME, ONCOGENIC_DRIVER_MUTATION_FILE ),
+                                     sheet = 5,
+                                     startRow = 2 ) %>%
+    unite( driver_gene_index, Gene, Mutation, sep = "_", remove = FALSE )
+```
+
+# Oncogenic pathway definitions
+
+We used the oncogenic RAS pathway defintion from [Oncogenic Signaling Pathways in
+The Cancer Genome
+Atlas](https://www.sciencedirect.com/science/article/pii/S0092867418303593?via%3Dihub)
+to define RAS pathway members.
+
+```{r oncogenic_pathway_definitions}
+rasPathwayDefFile <- file.path( DATA_HOME,  )
+rasPathwayTab <- read.delim( file = rasPathwayDefFile, sep = "\t" )
+rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
+                    tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
+rasGeneSets <- lapply( rasGeneSets, as.character )
+ras_pathway_genes <- unlist( rasGeneSets )
+```
+
+# CCLE data
+
+## Affymetrix
+
+We created an ExpressionSet object from the normalised expression
+estimates downloaed from CCLE.
+
+```{r init_ccle_affy_eset}
+exprsDat <-  read.table( file = file.path( CCLE_HOME, CCLE_EXPRESSION_FILE ),
+                        sep = "\t", header = TRUE, skip = 2 )
+fdat <- exprsDat[, 1:2 ]
+exprsDat <- exprsDat[, -1:-2 ]
+
+mutdat <- read.table( file = file.path( CCLE_HOME, CCLE_ONCOMAP_MAF_FILE ),
+                     sep = "\t", header = TRUE, quote = "" )
+
+pdat <- data.frame(
+  sample.id = colnames( exprsDat ),
+  row.names = colnames( exprsDat ),
+  stringsAsFactors = FALSE )
+
+pdat$tumour <- factor( sub( "^[A-Z0-9]+_", "", rownames( pdat ),
+                           perl = TRUE ) )
+mutmat <- data.frame( row.names = row.names( pdat ) )
+for( i in levels( mutdat$Hugo_Symbol ) ) {
+  mutdatsub <- subset( mutdat, Hugo_Symbol == i )
+  mutmat[[ i ]] <- "no"
+  mutmat[ unique( as.character( mutdatsub$Tumor_Sample_Barcode ) ), i ] <- "yes" 
+}
+mutmat[ is.na( mutmat ) ] <- "no"
+mutmat <- mutmat[ rownames( pdat ), ]
+mutL <- as.list( as.data.frame( t( mutmat ), stringsAsFactors = FALSE ) )
+pdat$mutations <- lapply( mutL[ rownames( pdat ) ], function( x ) {
+  names( x ) <- levels( mutdat$Hugo_Symbol )
+  x
+} )
+pdat$RASSignalMut <- as.factor( apply( mutmat[, RAS_PATHWAY_GENES ], 1, function( x ) if( any( x %in% "yes" ) ) "yes" else "no" ) )
+
+eSeSet <- ExpressionSet( as.matrix( exprsDat ),
+                        phenoData = new( 'AnnotatedDataFrame', data = pdat[ colnames( exprsDat ),, drop = FALSE ] ),
+                        featureData = new( 'AnnotatedDataFrame', data = fdat ) )
+eSet <- eSet[, pData( eSet )$tumour %in% names( clCount )[ clCount > 2 ] ]
+pData( eSet ) <- droplevels( pData( eSet ) )
+saveRDS( eSet, file = CCLE_AFFY_ESET_FILE )
+```
+
+## Mutations
+
+```{r ccle_mutation_data}
+mutation_file <- file.path( DATA_HOME, CCLE_MUTATION_DATA_FILE )
+mutation_RAS_pway_dat <- read.delim( mutation_file ) %>%
+    filter( Variant_Classification != "Silent" ) %>%
+    filter( Protein_Change != "" ) %>%
+    dplyr::select( Hugo_Symbol, Tumor_Sample_Barcode, Protein_Change ) %>%
+    unite( cc_gene_index, Tumor_Sample_Barcode, Hugo_Symbol, sep = "_", remove = FALSE ) %>%
+    unite( driver_gene_index, Hugo_Symbol, Protein_Change, sep = "_", remove = FALSE ) %>%
+    filter( Hugo_Symbol %in% ras_pathway_genes )
+
+mutation_RAS_pway_dat_l <- split( mutation_RAS_pway_dat, mutation_RAS_pway_dat$cc_gene_index )
+aa_changes_pergene <- map( mutation_RAS_pway_dat_l, function( df ) {
+    data.frame( merged_protein_change = paste( df$Protein_Change, collapse = ";" ) )
+} ) %>% bind_rows( .id = "cc_gene_index" )
+mutation_RAS_pway_drivers_df <- mutation_RAS_pway_dat %>%
+    filter( driver_gene_index %in% driver_muts_dat$driver_gene_index ) %>%
+    left_join( aa_changes_pergene, by = "cc_gene_index" ) %>%
+    dplyr::select( -Protein_Change, -cc_gene_index, -driver_gene_index ) %>%
+    distinct( ) %>%
+    group_by( Tumor_Sample_Barcode ) %>%
+    mutate( RAS_pathway = any( !is.na( merged_protein_change ) ) ) %>%
+    ungroup( ) %>%
+    spread( Hugo_Symbol, merged_protein_change )
+KRAS_mutants_dat <- mutation_RAS_pway_dat %>%
+    filter( Hugo_Symbol == "KRAS" )
+```
+
+## RNA-seq
+
+We created a SummarizedExperiment object using the CCLE RNA-seq and
+mutation data. We integrated additional Ensembl gene and cancer driver
+mutation and pathway annotations.
+
+```{r init_ccle_rnaseq_se}
+rnaseq_file <- file.path( DATA_HOME, CCLE_RNASEQ_RESEM_FILE )
+rnaseq_dat <- read.delim( rnaseq_file ) %>%
+    separate( gene_id, c( "ensembl_gene_id", "ensembl_id_version" ), "\\.", remove = FALSE ) %>%
+    dplyr::select( -transcript_ids )
+row_dat <- rnaseq_dat %>%
+    dplyr::select( gene_id, ensembl_gene_id, ensembl_id_version )
+
+ensembl_dat <- getBM( attributes = c( "ensembl_gene_id", "external_gene_name", "entrezgene_id" ),
+                     filters = "ensembl_gene_id",
+                     values = row_dat$ensembl_gene_id,
+                     mart = ensembl )
+
+ensembl_dat <- ensembl_dat %>%
+    filter( !duplicated( ensembl_gene_id ) )
+    row_dat <- row_dat %>%
+        left_join( ensembl_dat, by = "ensembl_gene_id" ) %>%
+        mutate( entrezgene_id = as.character( entrezgene_id ) ) %>%
+        mutate( rownames = gene_id ) %>%
+        column_to_rownames( var = "rownames" )
+
+assay_dat <- rnaseq_dat %>%
+    dplyr::select( -ensembl_gene_id, -ensembl_id_version ) %>%
+    column_to_rownames( var = "gene_id" ) %>%
+    as.matrix( )
+
+col_dat <- data.frame( Tumor_Sample_Barcode = colnames( assay_dat ) ) %>%
+    separate( Tumor_Sample_Barcode, c( "cell_line_id", "cancer_type" ), "_",
+             extra = "merge", remove = FALSE ) %>%
+    mutate( CELL_LINE_ID = cell_line_id ) %>%
+    mutate( CELL_LINE_NAME = cell_line_id ) %>%
+    left_join( mutation_RAS_pway_drivers_df, by = "Tumor_Sample_Barcode" ) %>%
+    mutate( RAS_pathway = ifelse( is.na( RAS_pathway ), FALSE, TRUE ) ) %>%
+    mutate( KRASmut_driver = ifelse( !is.na( KRAS ), "mutant", "wt" ) ) %>%
+    mutate( KRASmut_driver = factor( KRASmut_driver, levels = c( "wt", "mutant" ) ) ) %>%
+    mutate( KRASmut = ifelse( Tumor_Sample_Barcode %in% KRAS_mutants_dat$Tumor_Sample_Barcode,
+                             "mutant", "wt" ) ) %>%
+    mutate( KRASmut = factor( KRASmut, levels = c( "wt", "mutant" ) ) ) %>%
+    mutate( rownames = Tumor_Sample_Barcode  ) %>%
+    column_to_rownames( var = "rownames" )   
+
+rnaseq_se <- SummarizedExperiment( assays = list( counts = round( assay_dat ) ),
+                                  colData = col_dat[ colnames( assay_dat ), ],
+                                  rowData = row_dat[ rownames( assay_dat ), ] )
+assays( rnaseq_se )$vst <- vst( assay( rnaseq_se ) )
+saveRDS( rnaseq_se, rnaseq_se_file )
+
+all( assay( rnaseq_se )[ "ENSG00000000005.5", ] == assay_dat[ "ENSG00000000005.5", colnames( rnaseq_se ) ] )
+assay( rnaseq_se )[ "ENSG00000000005.5", "X5637_URINARY_TRACT" ] == filter( rnaseq_dat, gene_id == "ENSG00000000005.5" ) %>% dplyr::select( X5637_URINARY_TRACT ) %>% pull( )
+colData( rnaseq_se )[ "X5637_URINARY_TRACT", c( "cell_line_id", "cancer_type" ) ]
+colData( rnaseq_se )[ "A253_SALIVARY_GLAND", "TLE3" ] %in% filter( mutation_dat, Tumor_Sample_Barcode == "A253_SALIVARY_GLAND" )$Protein_Change
+```
+
+## Drug sensitivity data
+
+There are two large cancer drug sensitivity datasets available, the
+GDSC and the CTRP, each detailed below.
+
+### Genomics of Drug Sensitivity in Cancer (GDSC)
+
+* A collaboration between The Sanger and Massachusettes General
+Hospital Cancer Center.
+
+* 518 compounds targeting 24 pathways across 988 cell lines.
+
+* https://www.cancerrxgene.org
+
+* GDSC1 987 Cell lines   367 Compounds
+* GDSC2 809 Cell lines   198 Compounds
+
+The GDSC data contains LN_IC50 and AUC drug sensitivity metrics. Data
+summary statistics are shown below. Some drugs have been tested twice
+on the same cell line in the GDSC data. In these cases, the lowest
+LN_IC50 value was selected.
+
+GDSC dose-response analysis was carried out using
+[gdscIC50](https://github.com/CancerRxGene/gdscIC50) R package.
+
+```{r gdsc_drug_data}
+GDSC1_dat <- read.xlsx( GDSC1_DATA_FILE )
+GDSC1_KRAS_mutation_dat <- read.csv( GDSC1_MUTATION_FILE ) %>%
+    filter( genetic_feature == "KRAS_mut" ) %>%
+    filter( tcga_desc == "LUAD" ) %>%
+    dplyr::select( cell_line_name, genetic_feature, is_mutated ) %>%
+    rename( CELL_LINE_NAME = cell_line_name )
+GDSC2_dat <- read.xlsx( GDSC2_DATA_FILE )
+gdsc_dat_l <- list( GDSC1 = GDSC1_dat, GDSC2 = GDSC2_dat ) %>%
+    map( group_by, DRUG_NAME, CELL_LINE_NAME ) %>%
+    map( filter, LN_IC50 == min( LN_IC50 ) ) %>%
+    map( ungroup )
+gdsc_ic50_l <- gdsc_dat_l %>%
+    map( dplyr::select, DRUG_NAME, CELL_LINE_NAME, LN_IC50 ) %>%
+    map( spread, CELL_LINE_NAME, LN_IC50 ) %>%
+    map( column_to_rownames, var = "DRUG_NAME" ) %>%
+    map( as.matrix )
+gdsc_auc_l <- gdsc_dat_l %>%
+    map( dplyr::select, DRUG_NAME, CELL_LINE_NAME, AUC ) %>%
+    map( spread, CELL_LINE_NAME, AUC ) %>%
+    map( column_to_rownames, var = "DRUG_NAME" ) %>%
+    map( as.matrix )
+gdsc_coldat_l <- gdsc_dat_l %>%
+    map( dplyr::select, CELL_LINE_NAME, TCGA_DESC ) %>%
+    map( distinct ) %>%
+    map( mutate, CELL_LINE_ID = gsub( "-", "", CELL_LINE_NAME ) ) %>%
+    map( mutate, rownames = CELL_LINE_NAME ) %>%
+    map( column_to_rownames, var = "rownames" )
+gdsc_coldat_l$GDSC1 <- gdsc_coldat_l$GDSC1 %>%
+    left_join( GDSC1_KRAS_mutation_dat, by = "CELL_LINE_NAME", suffix = c( "", "" ) ) %>%
+    mutate( rownames = CELL_LINE_NAME ) %>%
+    column_to_rownames( var = "rownames" )
+gdsc_rowdat_l <- gdsc_dat_l %>%
+    map( dplyr::select, DRUG_NAME, PUTATIVE_TARGET, PATHWAY_NAME ) %>%
+    map( mutate, TARGET_CATEGORY = PATHWAY_NAME ) %>%
+    map( mutate, rownames = DRUG_NAME ) %>%
+    map( distinct ) %>%
+    map( column_to_rownames, var = "rownames" )
+gdsc_se_l <- map2( gdsc_ic50_l, names( gdsc_ic50_l ), function( ic50_mat, n ) {
+    SummarizedExperiment( assays = list(
+                              response = ic50_mat,
+                              ln_IC50 = ic50_mat,
+                              AUC = gdsc_auc_l[[ n ]] ),
+                         colData = gdsc_coldat_l[[ n ]][ colnames( ic50_mat ), ],
+                         rowData = gdsc_rowdat_l[[ n ]][ rownames( ic50_mat ), ] )
+} )
+saveRDS( gdsc_se_l, GDSC_SE_L_FILE )
+
+rowData( gdsc_se_l[[1]] ) %>%
+    as.data.frame( ) %>%
+    filter( DRUG_NAME == "A-443654" ) %>%
+    DT::datatable( rownames = FALSE )
+```
+
+### The Cancer Therapeutics Response Portal (CTRP)
+
+* https://portals.broadinstitute.org/ctrp.v2.1/
+
+* CTRP v1 242 CCLs 185 compounds
+* CTRP v2 860 CCLs 481 compounds
+
+
+#### CTRPv1
+
+CTRPv1 comes with AUC drug sensitivity values. We integrated cell line
+and drug information from additional data files. The version 1
+data is complied from assays of 354 drug compounds across 242 cell lines.
+
+```{r ctrpv1_drug_data}
+CTRPv1_mat <- read.delim( file.path( DATA_HOME, CTRPv1_DATA_FILE ) ) %>%
+    group_by( ccl_name, cpd_name ) %>%
+    filter( area_under_curve == min( area_under_curve ) ) %>%
+    ungroup( ) %>%
+    spread( ccl_name, area_under_curve ) %>%
+    column_to_rownames( var = "cpd_name" ) %>%
+    as.matrix( )
+CTRPv1_cell_file <- file.path( DATA_HOME, CTRPv1_CELL_FILE )
+CTRPv1_cell_dat <- read.delim( file.path( DATA_HOME, CTRPv1_cell_file ) ) %>%
+    mutate( CELL_LINE_NAME = ccl_name ) %>%
+    mutate( CELL_LINE_ID = ccl_name ) %>%
+    mutate( rownames = ccl_name ) %>%
+    column_to_rownames( var = "rownames" )
+CTRPv1_drug_dat <- read.delim( CTRPv1_DRUG_FILE ) %>%
+    mutate( DRUG_NAME = cpd_name ) %>%
+    mutate( TARGET_CATEGORY = target_or_activity_of_compound ) %>%
+    mutate( rownames = cpd_name ) %>%
+    column_to_rownames( var = "rownames" )
+CTRPv1_se <- SummarizedExperiment( assays = list(
+                                       response = CTRPv1_mat,
+                                       AUC = CTRPv1_mat ),
+                                  colData = CTRPv1_cell_dat[ colnames( CTRPv1_mat ), ],
+                                  rowData = CTRPv1_drug_dat[ rownames( CTRPv1_mat ), ] )
+saveRDS( CTRPv1_se, CTRPv1_se_file )
+
+rowData( CTRPv1_se ) %>%
+    as.data.frame( ) %>%
+    filter( DRUG_NAME == "10-DEBC" ) %>%
+    dplyr::select( cpd_name, target_or_activity_of_compound, gene_symbol_of_protein_target ) %>%
+    DT::datatable( rownames = FALSE )
+```
+
+#### CTRPv2
+
+CTRPv2 comes with AUC and EC50 drug sensitivity values. We integrated cell line
+and drug information from additional data files. The version 2
+data is complied from assays of 545 compounds across 887 cell lines.
+
+```{r ctrpv2_drug_data}
+    CTRPv2_experiment_dat <- read.delim( file.path( DATA_HOME, CTRPv2_DATA_FILE ) )
+    CTRPv2_cell_dat <- read.delim( file.path( DATA_HOME, CTRPv2_CELL_FILE ) ) %>%
+        mutate( CELL_LINE_NAME = ccl_name ) %>%
+        mutate( CELL_LINE_ID = ccl_name ) %>%
+        mutate( rownames = ccl_name ) %>%
+        column_to_rownames( var = "rownames" )
+    CTRPv2_drug_dat <- read.delim( file.path( DATA_HOME, CTRPv2_DRUG_FILE ) %>%
+        mutate( DRUG_NAME = cpd_name ) %>%
+        mutate( TARGET_CATEGORY = as.character( target_or_activity_of_compound ) ) %>%
+        mutate( TARGET_CATEGORY = ifelse( TARGET_CATEGORY == "inhibitor of BCL2, BCL-xL, and BCL-W",
+                                          "inhibitor of BCL2, BCL-xL and BCL-W", TARGET_CATEGORY ) ) %>%
+        mutate( rownames = cpd_name ) %>%
+        column_to_rownames( var = "rownames" ) 
+    CTRPv2_mat <- read.delim( file.path( DATA_HOME, CTRPv2_CURVES_FILE ) ) %>%
+        left_join( CTRPv2_experiment_dat, by = "experiment_id" ) %>%
+        left_join( CTRPv2_cell_dat, by = "master_ccl_id" ) %>%
+        left_join( CTRPv2_drug_dat, by = "master_cpd_id" ) %>%
+        dplyr::select( ccl_name, cpd_name, apparent_ec50_umol, area_under_curve )
+    CTRPv2_ec50_mat <- CTRPv2_mat %>%
+        dplyr::select( -area_under_curve ) %>%
+        group_by( ccl_name, cpd_name ) %>%
+        filter( apparent_ec50_umol == min( apparent_ec50_umol ) ) %>%
+        ungroup( ) %>%
+        distinct( ) %>%
+        spread( ccl_name, apparent_ec50_umol ) %>%
+        column_to_rownames( var = "cpd_name" ) %>%
+        as.matrix( )
+    CTRPv2_AUC_mat <- CTRPv2_mat %>%
+        dplyr::select( -apparent_ec50_umol ) %>%
+        group_by( ccl_name, cpd_name ) %>%
+        filter( area_under_curve == min( area_under_curve ) ) %>%
+        ungroup( ) %>%
+        distinct( ) %>%
+        spread( ccl_name, area_under_curve ) %>%
+        column_to_rownames( var = "cpd_name" ) %>%
+        as.matrix( )
+    CTRPv2_se <- SummarizedExperiment( assays = list(
+                                           response = CTRPv2_AUC_mat,
+                                           AUC = CTRPv2_AUC_mat ),
+                                      colData = CTRPv2_cell_dat[ colnames( CTRPv2_ec50_mat ), ],
+                                      rowData = CTRPv2_drug_dat[ rownames( CTRPv2_ec50_mat ), ] )
+    saveRDS( CTRPv2_se, CTRPv2_SE_FILE )
+}
+```
+
+# TCGA
+
+We downloaded SummarizedExperiment RNA-seq data objects for all TCGA cohorts from GDC legacy.
+
+`query_rnaseq <- GDCquery( project = "TCGA-LUAD",
+                          data.category = "Gene expression",
+                          data.type = "Gene expression quantification",
+                          platform = "Illumina HiSeq", 
+                          file.type  = "results",
+                          experimental.strategy = "RNA-Seq",
+                          legacy = TRUE )`
+
+## Per-tumour SE
+
+We went on to preprocess the raw count data and integrate mutation,
+clinical and pathway information.
+
+We integrated base level somatic mutation data for LUAD so we could
+fully characterise the type of KRAS mutation. We downloaded these data.
+						 
+```{r init_tcga_per_tumour}
+maf_paths <- list( LUAD = file.path( "b2e25bdf-f2b5-4a37-b330-05251ea09f2c",
+                                    "gsc_LUAD_pairs.aggregated.capture.tcga.uuid.automated.somatic.maf" ) )
+
+for( tumour in TCGA_TUMOURS ) {
+    tumour_se_file <- paste0( tumour, "_se.rds" ) 
+    se <- readRDS( file.path( TCGA_HOME, tumour_se_file ) )
+    
+    ## - rename assays slots for DESeq2 compatibility
+    names( assays( se ) ) <- c( "counts", "scaled_estimate" )
+    
+    assay( se ) <- round( assay( se ) )
+    
+    ## - remove duplicate rows
+    se <- se[ !duplicated( rownames( se ) ), ]
+    
+    ## add assay matrix rownames to rowData
+    rowData( se )$id <- rownames( assay( se ) )
+    
+    ## - vst on raw counts
+    vst_res <- varianceStabilizingTransformation( assay( se ) )
+    rownames( vst_res ) <- sub( "\\.\\d+$", "", rownames( vst_res ) )
+    assays( se )$vst <- vst_res
+
+    ## - z-score normalise
+    assays( se )$zscore <- apply( assays( se_t )$vst, 2, function( x ) ( x - median( x ) )/ mad( x ) )
+    
+    ## - add sample id to map to Sanchez-Vega et al. TCGA PanCan Pathway paper
+    se$pancan_pathway <- sub( "[AB]$", "", se$sample )
+    
+    ## - add tumour normal label column
+    se$tumour_normal <- "tumour"
+    se$tumour_normal[ se$definition %in% "Solid Tissue Normal" ] <- "normal"
+    
+    ## - select tumour samples only
+    ## - select only tumour TCGA samples
+    se_t <- se[ ,!se$definition %in% "Solid Tissue Normal" ]
+    
+    ## - add mutation data to the tumour samples
+    ##------------------------------------
+    ## - Oncogenic-RAS pathway definition
+    rasPathwayDefFile <- file.path( "..", "oncogenicRASPath_TCGA", "rasPathwayDefinition.txt" )
+    rasPathwayTab <- read.delim( file = rasPathwayDefFile, sep = "\t" )
+    
+    rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
+                        tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
+    rasGeneSets <- lapply( rasGeneSets, as.character )
+    
+    ##--------------------------------------
+    ## - Oncogenic RAS signalling alterations
+
+    ## - Alteration-level alterations per-sample
+    alt_altDatFile <- file.path( "..", "oncogenicRASPath_TCGA", "oncogenic_pathway_alteration_level_TCGA.txt" )
+    alt_altDat <- read.table( file = alt_altDatFile, header = TRUE, sep = "\t" )
+    colnames( alt_altDat )[ 1 ] <- "pancan_pathway"
+    
+    ## Mapping to specific KRAS mutation type
+    
+    ## - read maf file
+    if( tumour == "LUAD" ) {
+        maf_file <- file.path( "cohorts", project, "legacy", "Simple_nucleotide_variation",
+                              "Simple_somatic_mutation",
+                              maf_paths[[ tumour ]] )
+        mafdat <- read.table( file = maf_file, sep = "\t", header = TRUE, quote = "", stringsAsFactors = FALSE )
+        mafdat_kras <- subset( mafdat, Hugo_Symbol == "KRAS" )
+        mafdat_kras$sample <- unlist( lapply( strsplit( mafdat_kras$Tumor_Sample_Barcode, "-" ),
+                                             function( s ) {
+                                                 paste( s[ 1:4 ], collapse = "-", sep = "" )
+                                             } ) )
+        amino_dat <- mafdat_kras[, c( "Protein_Change", "Tumor_Sample_Barcode", "sample" ) ]
+        amino_l <- split( amino_dat, amino_dat$sample )
+        ## - there are two patients with two samples TCGA-35-3615-01A & TCGA-44-2668-01A
+        ## - both samples form both patients are p.G12C
+        amino_df <- data.frame( sample = names( amino_l ),
+                               amino = unlist( lapply( amino_l, function( mat ) {
+                                   paste( unique( mat[, 1 ] ), collapse = ":", sep = "" )
+                               } ) ) )
+        
+        ## - alteration level
+        df <- colData( se_t ) %>%
+            as.data.frame( ) %>%
+            left_join( amino_df[, c( "amino", "sample" ) ], by = "sample" )
+        colData( se_t ) <- DataFrame( df, row.names = df$rowname )
+        se_t$amino_site <- sub( ".$", "", colData( se_t )$amino )
+    }
+    
+    df <- colData( se_t ) %>%
+        as.data.frame( ) %>%
+        left_join( alt_altDat, by = "pancan_pathway" )
+    colData( se_t ) <- DataFrame( df, row.names = df$rowname )
+    
+    ## - remove samples with no MUT.KRAS status
+    se_t <- se_t[ ,!is.na( se_t$MUT.KRAS ) ]
+    
+    ##-------------------------------------
+    ## identify RAS pathway alterations
+    alt_genes <- sapply( strsplit( colnames( alt_altDat )[ -1 ], "\\." ), '[[', 2 )
+    rasAlts_f <- alt_genes %in% unlist( rasGeneSets )
+    rasAlts <- colnames( alt_altDat )[ -1 ][ rasAlts_f ]
+    rasAlts <- rasAlts[ colSums( as.matrix( colData( se_t )[, rasAlts ] ) ) > 0 ]
+    
+    onco_ras_labels <- colData( se_t ) %>%
+        as.data.frame( ) %>% 
+        dplyr::select( sample, one_of( rasAlts ) ) %>%
+        tidyr::gather( name, value, -sample ) %>%
+        filter( name %in% rasAlts ) %>%
+        group_by( sample ) %>%
+        dplyr::summarize( onco_ras = ifelse( all( !value ), "oncoras_neg",
+                                     ifelse( any( name == "MUT.KRAS" & value ), "kras_mut", "oncoras_pos" ) ) ) %>%
+        as.data.frame( )
+    
+    ## - add label to se
+    df <- colData( se_t ) %>%
+        as.data.frame( ) %>%
+    left_join( onco_ras_labels, by = "sample" )
+    colData( se_t ) <- DataFrame( df, row.names = df$rowname )
+    
+    ##---------------------------------------------------
+    ## Add TCGA PanCancer immune landscape paper metrics
+    cell_imm_lscape_file <- file.path( data, CELL_IMMUNE_LANDSCAPE_FILE )
+    cell_imm_lscape_dat <- read.table( file = cell_imm_lscape_file, sep = "\t", header = TRUE )
+    
+    df <- colData( se_t ) %>%
+        as.data.frame( ) %>%
+        left_join( cell_imm_lscape_dat, by = c( "patient" = "TCGA.Participant.Barcode" ) )
+    colData( se_t ) <- DataFrame( df, row.names = df$rowname )
+    
+    rowData( se_t )$gene_symbol <- sub( "\\|.*", "", rowData( se_t )$id )
+    saveRDS( se_t, file = file.path( TCGA_HOME, paste0( tumour, "_se.rds" ) ) )
+}
+```
+
+## Pancancer SE
+
+We constructed a pancancer SummarizedExperiment object. We z-score
+normalised the per-cancer VST expression estimates so expression
+values could be compared across tumour types.
+
+```{r init_tcga_pancancer}
+tcga_se_files <- dir( TCGA_HOME, pattern = "*_se.rds" )
+se_l <- map( tcga_se_files, function( f ) {
+    readRDS( file.path( TCGA_HOME, f ) )
+} ) %>%
+    setNames( sub( "_se.rds", tcga_se_files ) )
+
+common_colnames <- table( unlist( lapply( se_l, function( se ) {
+    colnames( colData( se ) )
+} ) ) )
+common_colnames <- names( common_colnames[ common_colnames == length( se_l ) ] )
+se_pc <- do.call( 'cbind', lapply( se_l, function( se ) {
+    colData( se ) <- colData( se )[, common_colnames ]
+    #if( "purity_regressed" %in% names( assays( se ) ) )
+    #    assays( se ) <- assays( se )[ -4 ]
+    se
+} ) )
+se_pc$tumour <- factor( se_pc$tumour )
+saveRDS( se_pc, file = file.path( TCGA_HOME, "pancancer_se_.rds" ) )
+```
+
+# Uppsala
+
+[GSE81089](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE81089)
+ 
+Fresh frozen tumor tissue from 199 patients diagnosed with NSCLC and
+surgically treated 2006-2010 at the Uppsala University Hospital,
+Uppsala, Sweden and 19 paired normal lung tissues. Clinical data were
+retrieved from the regional lung cancer registry
+
+```{r init_uppsala}
+library("biomaRt")
+ensembl <- useMart( "ensembl", dataset="hsapiens_gene_ensembl" )
+gse <- getGEO( 'GSE81089',
+              destdir = adat$analysis.path,
+              GSEMatrix = TRUE )
+eset <- gse[[ 1 ]]
+## remove normals
+eset <- eset[, pData( eset )$source_name_ch1 == "Human NSCLC tissue" ]
+exprs_dat <- read.delim( file = UPPSALA_RNASEQ_EXPRESSION_DATA_FILE,
+                        row.names = 1 )
+## two sample ids do not match between expression matrix and pData(eset)$title
+## We remove those here.
+common_sample_ids <- intersect( sampleNames( eset ), colnames( exprs_dat ) )
+eset <- eset[, common_sample_ids ]
+exprs_mat <- as.matrix( exprs_dat[, common_sample_ids ] )
+ensembl_dat <- getBM( attributes = c( "ensembl_gene_id", "external_gene_name" ),
+                     filters = "ensembl_gene_id",
+                     values = rownames( exprs_mat ),
+                     mart = ensembl )
+rowdat <- data.frame( ensembl_gene_id = rownames( exprs_mat ) ) %>%
+    left_join( ensembl_dat, by = "ensembl_gene_id" ) %>%
+    mutate( rownames = ensembl_gene_id ) %>%
+    column_to_rownames( var = "rownames" )
+se <- SummarizedExperiment( assay = exprs_mat,
+                           colData = pData( eset ),
+                           rowData = rowdat )
+se <- se[ !is.na( rowData( se )$external_gene_name ), ]
+assays( se )$vst <- DESeq2::vst( assay( se ) )
+assays( se )$z <- t( scale( t( scale( assays( se )$vst ) ) ) )
+saveRDS( se, file = UPPSALA_RNASEQ_EXPRESSION_FILE )
+```
+
+# GSE40419
+
+A Korean LUAD cohort of 87 samples with RNA-Seq and exome-Seq data.
+
+We test KRAS (18/87), EGFR (22/87) and TP53 (22/87) mutation association with RAS activity groups
+generated by clustering.
+
+[GSE40419 expression
+data](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE40419)
+
+Expression data are available as an RPKM matrix from GEO. Mutation data
+are available in SuppTable3.xlsx from:
+
+[The transcriptional landscape and mutational profile of lung
+adenocarcinoma: Genome Research](https://genome.cshlp.org/content/22/11/2109)
+[Supplementary data](https://genome.cshlp.org/content/22/11/2109/suppl/DC1)
+
+Understanding the molecular signatures of cancer is important to apply
+appropriate targeted therapies. Here we present the first large scale
+RNA sequencing study of lung adenocarcinoma demonstrating its power to
+identify somatic point mutations as well as transcriptional variants
+such as gene fusions, alternative splicing events and expression
+outliers. Our results reveal the genetic basis of 200 lung
+adenocarcinomas in Koreans including deep characterization of 87
+surgical specimens by transcriptome sequencing. We identified driver
+somatic mutations in cancer genes including EGFR, KRAS, NRAS, BRAF,
+PIK3CA, MET and CTNNB1. New cancer genes, such as LMTK2, ARID1A,
+NOTCH2 and SMARCA4, were also suggested as candidates for novel
+drivers in lung adenocarcinoma. We found 45 fusion genes, 8 of which
+were chimeric tyrosine kinases involving ALK, RET, ROS1, FGFR2, AXL
+and PDGFRA. Of 17 recurrent alternative splicing events, we identified
+exon 14 skipping in the proto-oncogene MET as highly likely to be a
+cancer driver. The number of somatic mutations and expression outliers
+varied markedly between individual cancers and was strongly correlated
+with smoking history of cancer patients. In addition, we identified
+genomic blocks where genes were frequently up- or down-regulated
+together that could be explained by copy number alterations in the
+cancer tissue. We also found an association between lymph node
+metastasis and somatic mutations in TP53. Our findings broaden our
+understanding of lung adenocarcinoma and may also lead to new
+diagnostic and therapeutic approaches.
+
+## Data
+
+Here we download the ExpressionSet from GEO, read in and log2
+transform the RPKM expression data, integrate mutation data and select
+the tumour samples.
+
+We see log2 expression value distributions across the 87 samples for
+all features and those where multiple features per gene have been
+removed. The feature with the maximum mean expression value across the
+cohort was selected, where multiple features per gene existed.
+
+```{r gse40419}
+eset_gse40419_l <- getGEO( 'GSE40419', GSEMatrix = TRUE )
+eset_geo <- eset_gse40419_l[[ 1 ]]
+eset_geo$title <- as.character( eset_geo$title )
+mut_dat <- read.xlsx( KOREAN_MUTATION_DATA_FILE,
+                     sheet = 3,
+                     startRow = 2 ) %>%
+    filter( Gene %in% c( "TP53", "EGFR", "KRAS" ) ) %>%
+    select( -2 ) %>%
+    gather( sample_id, value, -Gene ) %>%
+    mutate( value = ifelse( value == "0|0", "0", "1" ) ) %>%
+    spread( Gene, value )
+pdat_geo <- pData( eset_geo ) %>%
+    mutate( rownames = title ) %>%
+    rename( sample_id = title ) %>%
+    left_join( mut_dat, by = "sample_id" ) %>%
+    column_to_rownames( var = "rownames" )
+rpkm_dat_geo <- read.delim( file = KOREAN_EXPRESSION_DATA_FILE,
+                           stringsAsFactors = FALSE )
+exprs_mat_geo <- rpkm_dat_geo %>%
+    select( -accession, -chrom, -start, -end, -strand, -gene ) %>%
+    as.matrix( )
+fdat_geo <- rpkm_dat_geo %>%
+    rownames_to_column( var = "ID" ) %>%
+    select( ID, gene, accession, chrom, start, end, strand ) 
+eset_gse40419 <- ExpressionSet( assayData = log2( exprs_mat_geo[, pdat_geo$sample_id] + 0.1 ),
+                               phenoData = new( "AnnotatedDataFrame", data = pdat_geo ),
+                               featureData = new( "AnnotatedDataFrame", data = fdat_geo ) )
+eset_gse40419 <- eset_gse40419[, eset_gse40419$source_name_ch1 == "Lung cancer cells" ]
+saveRDS( eset_gse40419, KOREAN_EXPRESSION_FILE )
+```

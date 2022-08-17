@@ -1,0 +1,624 @@
+---
+title: "RAS84 signature sample classification of TCGA LUAD cohort : Project 002"
+author: "philip.east@crick.ac.uk"
+date: "12/02/2019"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE,message=FALSE,warning=FALSE)
+```
+
+This script determines mutational correlates across the TCGA LUAD 5 RAS
+activity groups.
+
+```{r r_init}
+library( affy )
+library( limma )
+library( reshape2 )
+library( scales )
+library( RColorBrewer )
+library( ComplexHeatmap )
+library( gplots )
+library( gridExtra )
+library( ggthemes )
+library( Hmisc )
+library( vcd )
+library( UpSetR )
+library( monocle )
+library( pls )
+library( DESeq2 )
+library( circlize )
+library( ggforce )
+library( tidyverse )
+library( openxlsx )
+library( broom )
+library( DT )
+library( ggrepel )
+
+source( "/camp/stp/babs/working/eastp/code/R/R.packages.east01.functions.R")
+source( "../../../scripts/lib.Ras_HighLow.335.R" )
+
+my_grey <- "#707173"
+my_red <- "#993333"
+my_orange <- "#f6ad6e"
+my_green <- "#7ab51d"
+my_lightgreen <- "#adcf82"
+my_purple <- "#bb90bd"
+my_blue <- "#4066aa"
+my_lightblue <- "#336699"
+
+plot_formatter <- function() {
+    theme_bw( ) +
+        theme( panel.grid.major = element_blank( ),
+               panel.grid.minor = element_blank( ),
+               panel.border = element_blank( ),
+              panel.background = element_blank( ),
+              axis.line = element_line(color = "black"),
+              axis.line.x = element_line(color="black", size = 0.5 ),
+              axis.line.y = element_line(color="black", size = 0.5 ),
+              text = element_text( size = 12 ) )
+}
+
+tumour <- "LUAD"
+sig_n <- "RAS84"
+project <- paste( "TCGA", tumour, sep = "-" )
+
+adat <- project.init( file.path( tumour, sig_n ), root = "./" )
+```
+
+# Load data
+
+Load the SummarizedExperiment TCGA LUAD expression data from the TCGA
+sample_classification analysis. Load the TCGA compatable filtered
+signatures from the TCGA LUAD validate signatures analysis. Load TCGA somatic
+mutation details.
+
+```{r tcga_se}
+se_t_file <- "LUAD_processed_se.rds"
+se_t <- readRDS( file.path( "data", "TCGA", se_t_file ) )
+```
+
+# RAS Signatures
+
+Read in the RAS84 signature genes and the parent signatures.
+
+```{r ras84_sig}
+SIG_HOME <- file.path( "data", "signatures" )
+krasSigNames <- sub( "\\.csv", "", dir( SIG_HOME ) )
+signatures <- lapply( krasSigNames, function( sigFile ) {
+    read.table( file = file.path( SIG_HOME, paste( sigFile, "csv", sep = "." ) ),
+               sep = "\t", stringsAsFactors = FALSE )[, 1 ]
+} )
+names( signatures ) <- make.names( krasSigNames )
+ras84_map <- read.xlsx( file.path( "data", "RAS84_feature_map.xlsx" ) )
+signatures$RAS84 <- ras84_map$TCGA_gene_symbol
+```
+
+```{r RAS_alts_and_pathway}
+rasPathwayDefFile <- file.path( "data", "rasPathwayDefinition.txt" )
+rasPathwayTab <- read.delim( file = rasPathwayDefFile, sep = "\t" )
+rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
+                    tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
+rasGeneSets <- lapply( rasGeneSets, as.character )
+
+alt_altDatFile <- file.path(  "data", "oncogenic_pathway_alteration_level_TCGA.txt" )
+alt_altDat <- read.table( file = alt_altDatFile, header = TRUE, sep = "\t" )
+colnames( alt_altDat )[ 1 ] <- "pancan_pathway"
+
+## identify RAS pathway alterations
+alt_genes <- sapply( strsplit( colnames( alt_altDat )[ -1 ], "\\." ), '[[', 2 )
+rasAlts_f <- alt_genes %in% unlist( rasGeneSets )
+rasAlts <- colnames( alt_altDat )[ -1 ][ rasAlts_f ]
+rasAlts <- rasAlts[ colSums( as.matrix( colData( se_t )[, rasAlts ] ) ) > 0 ]
+```
+
+# RAS pathway alterations
+
+Here we look at RAS index distributions across RAS pathway mutation
+status. We use the RAS pathway membership definition from the
+oncogenic alterations TCGA Cell paper references above. This is to
+determine if any oncogenic RAS pathway driver correlates with RAS84
+signature activity.
+
+```{r ras_pathway_alt,fig.width=8}
+ras_alt_df <- colData( se_t )[, c( "rowname", "ras_index", rasAlts ) ] %>%
+    as.data.frame( ) %>%
+    tidyr::gather( alteration, present, -rowname, -ras_index )
+
+ras_alt_prev <- ras_alt_df %>% 
+    group_by( alteration ) %>% 
+    summarize( prevalence = sum( present ) / n() ) %>%
+    filter( prevalence > 0.05 )
+
+dodge <- position_dodge( width = 0.4 )
+plotdat <- ras_alt_df %>%
+    filter( alteration %in% ras_alt_prev$alteration )
+ras_alt_gg <- ggplot( plotdat, aes( x = alteration, y = ras_index, color = present ) ) +
+    geom_violin( position = dodge ) +
+    geom_boxplot( position = dodge, width = 0.1 ) +
+    theme( axis.text.x = element_text( angle = 90, hjust = 1 ) )
+print( ras_alt_gg )
+
+png( file = file.path( adat$plot.path, "violinplot.png" ),
+    width = 1200 )
+print( ras_alt_gg )
+dev.off()
+```
+```{r ras_pathway_alt_lm}
+lmfit <- plotdat %>%
+    nest( -alteration ) %>%
+    mutate(
+        fit = map( data, ~ lm( ras_index ~ present, data = .x ) ),
+        tidied = map(fit, tidy) ) %>% 
+    unnest( tidied ) %>%
+    filter( term != "(Intercept)" ) %>%
+    mutate( padj = p.adjust( p.value, method = "fdr" ) ) %>%
+    filter( padj < 0.05 ) %>%
+    arrange( p.value )
+DT::datatable( lmfit )
+```
+
+# Chisq Test
+
+Here we test TCGA LUAD somatic mutation distributions across our 5 RAS
+activity groups using a chisq test. Alterations with a significant
+non-random distribution across the RAS activity groups are shown in
+the table and mosaic plots below.
+
+```{r chisq_test}
+mutation_dat <- colData( se_t ) %>%
+    as.data.frame( ) %>%
+    dplyr::select(
+               barcode,
+               RAS84,
+               contains( "AMP", ignore.case = FALSE ),
+               contains( "DEL", ignore.case = FALSE ),
+               contains( "MUT", ignore.case = FALSE ),
+               contains( "FUSION", ignore.case = FALSE ) ) %>%
+    tidyr::gather( variants, value, -barcode, -RAS84 )
+
+mutation_counts <- mutation_dat %>%
+    group_by( variants ) %>%
+    dplyr::summarize( total = sum( value ) ) %>%
+    filter( total > 10 )
+
+mutation_dat <- mutation_dat %>%
+    filter( variants %in% mutation_counts$variants )
+
+mutation_tab <- mutation_dat %>%
+    group_by( RAS84, variants ) %>%
+    dplyr::summarize( mutant = sum( value ),
+                      wildtype = sum( !value ) ) %>%
+    gather( genotype, count, -RAS84, -variants ) %>%
+    unite( colheader, RAS84, genotype, sep = "." ) %>%
+    spread( colheader, count )
+
+mutation_res <- mutation_dat %>%
+    group_by( variants ) %>%
+    dplyr::summarize( pval = chisq.test( value, RAS84 )$p.value ) %>%
+    mutate( fdr = p.adjust( pval, method = "fdr" ) )
+
+mutations_decide <- mutation_res %>%
+    filter( fdr < 0.05 ) %>%
+    filter( variants != "DEL.CDKN2B" )
+
+dbase <- mutation_tab %>%
+    left_join( mutation_res, by = "variants" ) %>%
+    arrange( fdr ) %>%
+    as.data.frame( )
+
+write.xlsx( dbase, file = file.path( "results"
+                                    "variant_calls_rasactivity_groups.xlsx" ) )
+DT::datatable( dbase )
+```
+
+## Mosaic plots {.tabset .tabset-fade}
+
+```{r mosaic,results='asis',echo=FALSE}
+for( i in mutations_decide$variants ) {
+    tab <- mutation_dat %>%
+        filter( variants == i ) %>%
+        dplyr::select( RAS84, value ) %>%
+        table( )
+    colnames( tab ) <- c( "wildtype", "mutant" )
+    cat( "### ", i, "\n" )
+    print( mosaic( tab, shade = TRUE, legend = TRUE, main = i ) )
+    cat( " \n\n" )
+}
+```
+
+# KRAS mutation
+
+KRAS mutation distribution across the 5 RAS activity groups for RAS84 segregation.
+
+```{r kras_mutation}
+plotdat <- colData( se_t )[, c( "rowname", "RAS84", "MUT.KRAS" ) ] %>%
+  as.data.frame( ) %>%
+  group_by( RAS84, MUT.KRAS ) %>%
+  mutate( n = n( ) ) %>%
+  group_by( RAS84 ) %>%
+  mutate( N = n( ) ) %>%
+  mutate( percent = n / N * 100 ) %>%
+  dplyr::select( -rowname ) %>%
+  distinct( )
+
+gg <- ggplot( plotdat, aes( x = RAS84, y = percent, fill = MUT.KRAS, group = MUT.KRAS ) ) +
+    geom_bar( stat = "identity" ) +
+    scale_fill_manual( values = c( 'TRUE' = my_green, 'FALSE' = "white" ) ) +
+    labs( x = "RAS Activity", y = "% oncogenic KRAS mutation" )
+
+gg <- my_gg_themes( gg )
+gg <- gg + theme( axis.text.x = element_text( angle = 90, hjust = 0.95 ) ) +
+    theme( text = element_text( size = 14 ) )
+gg
+```
+
+## KRAS mutation distribution (all signatures)
+
+We quantify the effect size of the segragation of KRAS mutation across
+the five RAG groups for all RAS signatures. We use log-likleyhood to
+quantify segregation.
+
+```{r kras_loglik}
+KRAS_mutation_dat_l <- map( names( mutation_dat_l ), function( sig_n ) { 
+    mutation_dat_l[[ sig_n ]] %>%
+        filter( variants == "MUT.KRAS" )
+} )
+names( KRAS_mutation_dat_l ) <- names( mutation_dat_l )
+
+glm_fit <- map( KRAS_mutation_dat_l, function( df ) {
+    glm( value ~ RGS, data = df, family = "binomial" )
+} )
+
+plotdat <- map( glm_fit, logLik )%>%
+    melt( ) %>%
+    dplyr::rename( signatures = L1 )
+
+loglik_gg <- ggplot( plotdat, aes( x = 1, y = value, label = signatures ) ) +
+    geom_vline( xintercept = 1 ) +
+    geom_point( size = 5 ) +
+    geom_text_repel( nudge_x = 0.1 ) +
+    plot_formatter( ) +
+    theme( legend.position = "none",
+          text = element_text( size = 8 ) )
+
+cairo_pdf( file = file.path( adat$plot.path, "KRAS_mutation_loglik.pdf" ), width = 3, height = 3 )
+print( loglik_gg )
+dev.off( )
+print( loglik_gg )
+```
+
+## Other mutations
+
+```{r other_loglik}
+loglik_other_gg_l <- map( names( mutations_decide_all ), function( mutation_gene ) {
+    specific_mutation_dat_l <- map( names( mutation_dat_l ), function( sig_n ) { 
+        mutation_dat_l[[ sig_n ]] %>%
+            filter( variants == mutation_gene )
+    } )
+    names( specific_mutation_dat_l ) <- names( mutation_dat_l )
+    glm_fit <- map( specific_mutation_dat_l, function( df ) {
+        glm( value ~ RGS, data = df, family = "binomial" )
+    } )
+    plotdat <- map( glm_fit, logLik )%>%
+        melt( ) %>%
+        dplyr::rename( signatures = L1 )
+    ggplot( plotdat, aes( x = 1, y = value, label = signatures ) ) +
+        geom_vline( xintercept = 1 ) +
+        geom_point( size = 5 ) +
+        geom_text_repel( nudge_x = 0.1 ) +
+        plot_formatter( ) +
+        theme( legend.position = "none",
+              text = element_text( size = 8 ) )
+} )
+names( loglik_other_gg_l ) <- names( mutations_decide_all )
+```
+```{r render_other_loglik}
+for( i in names( loglik_other_gg_l ) ) {
+    cairo_pdf( file = file.path( adat$plot.path, paste0( i, "_mutation_loglik.pdf" ) ), width = 3, height = 3 )
+    print( loglik_other_gg_l[[ i ]] )
+    dev.off( )
+}
+```
+
+## RAS pathway alteration burden
+
+Here we look at the degree to which the RAS pathway as a whole is alterated per-patient and if this correlates with the RAS activity groupings. From the mosaic plot below we see that there is not a strong association of RAS pathway alteration burden and RAS activity groups.
+
+```{r ras_pathway}
+ras_pathway_n <- colData( se_t ) %>%
+    as.data.frame( ) %>%
+    dplyr::select( c( rasAlts, "RAS84" ) ) %>%
+    rownames_to_column( var = "barcode" ) %>%
+    gather( alteration, presence, -barcode, -RAS84 ) %>%
+    group_by( barcode ) %>%
+    summarize( count = sum( presence ) ) %>%
+    ungroup( ) %>%
+    arrange( count ) %>%
+    left_join( as.data.frame( colData( se_t )[, c( "barcode", "RAS84" ) ] ),
+              by = "barcode" )
+
+mosaic( table( ras_pathway_n[, c( "count", "RAS84" ) ] ),
+        shade = TRUE, legend = TRUE )
+```
+
+# Heatmap TCGA LUAD RAS activity 5 clusters 
+
+Here we see other significant mutations associated with RAS activity
+groups. First alongside the patient groups heatmap and then as barcharts.
+
+```{r heatmap_dat}
+hmdat <- assays( se_t )$vst[ rowData( se_t )$RAS84, ] %>%
+                      as.data.frame( ) %>%
+                      rownames_to_column( var = "gene_id" ) %>%
+                      mutate( gene_id = sub( "\\|.*", "", gene_id ) )
+
+hmmat <- hmdat %>%
+    column_to_rownames( "gene_id" ) %>%
+    as.matrix( )
+
+hmmat <- hmmat - rowMedians( hmmat )
+```
+
+## Sample mutation annotation
+
+Here we setup the significant mutations as row annotations for the heatmap. 
+
+```{r mut_anno}
+mutations <- mutations_decide %>%
+    ##filter( variants != "DEL.CDKN2B" ) %>%
+    pull( variants )
+mutations <- mutations[ c( 6, 4, 8, 5, 7, 9, 1, 2, 3 ) ]
+
+anno_rows_muts_df <- colData( se_t )[, mutations ] %>%
+    as.data.frame( )
+
+cols_map <- sapply( colnames( anno_rows_muts_df ), function( x ) {
+    if( x == "MUT.KRAS" ) {
+        c( 'TRUE' = my_purple, 'FALSE' = "white")
+    } else {
+        c( 'TRUE' = my_green, 'FALSE' = "white")
+    }
+}, simplify = FALSE )
+
+hm_anno_row <- rowAnnotation( df = anno_rows_muts_df,
+                             col = cols_map,
+                             na_col = "white",
+                             gap = unit( 1, "mm" ),
+                             show_legend = FALSE,
+                             show_annotation_name = TRUE,
+                             annotation_name_side = "top",
+                             annotation_name_gp = gpar( fontsize = 6 ),
+                             simple_anno_size = unit( 2, "mm" ),
+                             border = TRUE )
+
+hmcols <- colorpanel( 1000, "white", my_grey, "#E3001A" )
+hm_ann_row_2_dat <- ras_pathway_n %>%
+    dplyr::select( barcode, count ) %>%
+    column_to_rownames( var = "barcode" ) %>%
+    as.matrix( )
+```
+
+## Signature gene annotation
+
+Here we setup parent signature gene membership as column annotation
+for the heatmap.
+
+```{r gene_anno}
+RAS84_parent_signatures <- c( "HRAS", "KRASG13D134", "RAS pathway" )
+
+parents <- melt( signatures[ RAS84_parent_signatures ], value.name = "gene_id" ) %>%
+    filter( gene_symbol %in% signatures$RAS84 ) %>%
+    mutate( flag = TRUE ) %>%
+    spread( L1, flag, fill = FALSE )
+
+hmdat <- hmdat %>%
+    left_join( parents, by = "gene_id" )
+
+col_anno_dat <- dplyr::select_( hmdat, .dots = RAS84_parent_signatures )
+colnames( col_anno_dat ) <- sig_name_map[ colnames( col_anno_dat ) ]
+col_anno_colours <- lapply( colnames( col_anno_dat ),
+                           function( x ) c( 'TRUE' = "lightgrey", 'FALSE' = "white" ) )
+names( col_anno_colours ) <- colnames( col_anno_dat )
+
+hm_anno_col <- HeatmapAnnotation( df = col_anno_dat,
+                                 show_annotation_name = TRUE,
+                                 simple_anno_size = unit( 1, "mm" ),
+                                 col = col_anno_colours,
+                                 annotation_width = 0.01,
+                                 na_col = "white",
+                                 gap = unit( 1, "mm" ),
+                                 show_legend = FALSE,
+                                 annotation_name_gp = gpar( fontsize = 6 ),
+                                 annotation_name_side = "left" )
+```
+
+## Heatmap
+
+```{r render_heatmap}
+hmcols <- colorpanel( 1000, my_blue, "white", my_red )
+
+hm <- Heatmap( t( hmmat ),
+              name = "Expression", 
+              clustering_method_rows = "ward.D2",
+              clustering_method_columns = "ward.D2",
+              show_column_names = TRUE,
+              show_row_names = FALSE,
+              col = colorRamp2(
+                  seq( from = -2, to = 2, length.out = length( hmcols ) ),
+                  hmcols ),
+              row_split = se_t$RAS84,
+              row_gap = unit( 1, "mm" ),
+              column_title = "RAS84",
+              column_names_gp = gpar( fontsize = 4 ),
+              heatmap_legend_param = list( title_gp = gpar( fontsize = 14 ),
+                                           labels_gp = gpar( fontsize = 4 ) ),
+              show_heatmap_legend = TRUE,
+              bottom_annotation = hm_anno_col,
+              cluster_row_slices = FALSE,
+              row_names_max_width = unit( 10, "mm" ) )
+
+hmmat_ras_index <- matrix( se_t$ras_index - median( se_t$ras_index ), ncol = 1 )
+rownames( hmmat_ras_index ) <- se_t$barcode
+
+hm_ras_index <- Heatmap( hmmat_ras_index,
+                        name = "RSI",
+                        clustering_method_rows = FALSE,
+                        clustering_method_columns = FALSE,
+                        show_column_names = TRUE,
+                        show_row_names = FALSE,
+                        col = colorRamp2(
+                            seq( from = -1, to = 1, length.out = length( hmcols ) ),
+                            hmcols ),
+                        row_split = se_t$RAS84,
+                        row_gap = unit( 1, "mm" ),
+                        column_names_gp = gpar( fontsize = 4 ),
+                        show_heatmap_legend = TRUE )
+
+print( hm + hm_ras_index + hm_anno_row )
+
+pdf( file = file.path( adat$plot.path, "RAS84_clusters_5_heatmap.pdf" ) ,
+    width = 8, height = 4 )
+hm + hm_ras_index + hm_anno_row
+dev.off( )
+```
+
+# Significant mutation barcharts {.tabset .tabset-fade}
+
+```{r sig_mut_barchart}
+plotdat <- mutation_dat %>%
+    filter( variants %in% mutations_decide$variants ) %>%
+    group_by( RAS84, variants ) %>%
+    summarize( mutant_percent = sum( value ) / n() * 100 )
+
+sig_mut_gg_l  <- map( unique( plotdat$variants ), function( i ) {
+    ggplot( subset( plotdat, variants == i ),
+                 aes( x = RAS84 y = mutant_percent ) ) +
+        geom_bar( stat = "identity", color = my_green, fill = my_green,
+                  width = 0.8 ) +
+        labs( x = "RAS Activity", y = paste( "% oncogenic", i, "mutation" ) ) +
+        plot_formatter( ) +
+        theme( axis.text.x = element_text( angle = 90, hjust = 0.95 ) )
+} )
+names( sig_mut_gg_l ) <- unique( plotdat$variants )
+```
+```{r sig_mut_barchart_out,results='asis',echo=FALSE}
+for( i in names( sig_mut_gg_l ) ) {
+    cat( "## ", i, "\n" )
+    print( sig_mut_gg_l[[ i ]] )
+    cat( " \n\n" )
+}
+```
+```{r sig_mut_barchart_file}
+for( i in names( sig_mut_gg_l ) ) {
+    pdf( file = file.path( adat$plot.path, paste0( sig_n, "_rasact_", i, "_KRASmut_sig_barplots.pdf" ) ),
+        height = 4, width = 1.5 )
+    print( gg )
+    dev.off( )
+}
+```
+
+# KRAS specific variant distributions 
+
+Here we look at the distribution of specific KRAS mutation types
+across the RSGs. We remove RSG-0 and focus on the groups with
+significant numbers of KRAS mutations. We run chisq.test globally and
+then on the individual genotypes compared to the remaining samples,
+treated as the control group.
+
+```{r}
+kras_onco_muts <- c( "p.G12A", "p.G12C", "p.G12D",
+                    "p.G12R", "p.G12S", "p.G12V",
+                    "p.G13C", "p.G13D", "p.Q61H", "p.Q61L" )
+
+chisq_dat <- data.frame( RAS84 = se_t$RAS84,
+                        amino = as.character( se_t$amino ),
+                        stringsAsFactors = FALSE ) %>%
+    filter( RAS84 != "RSG_0" ) %>%
+    droplevels( )
+
+chisq_dat$amino[ !chisq_dat$amino %in% kras_onco_muts ] <- NA
+chisq_dat$amino[ is.na( chisq_dat$amino ) ] <- "wt"
+
+print( mosaic( table( chisq_dat ), shade = TRUE, legend = TRUE, main = " KRAS variant ~ RAS activity groups" ) )
+pdf( file = file.path( adat$plot.path, "KRAS_variant_genotype_mosaic.pdf" ) )
+mosaic( table( chisq_dat ), shade = TRUE, legend = TRUE, main = " KRAS variant ~ RAS activity groups" )
+dev.off( )
+
+chisq.test( table( chisq_dat ) )
+
+chisq_res <- map( kras_onco_muts, function( mut ) {
+    chisq_dat_local <- chisq_dat %>%
+        mutate( amino = ifelse( amino == mut, amino, "wt" ) )
+    chisq.test( table( chisq_dat_local ) )
+} )
+names( chisq_res ) <- kras_onco_muts
+
+map( chisq_res, function( x ) data.frame( pval = x$p.value ) ) %>%
+    bind_rows( .id = "KRAS_genotypes" ) %>%
+    datatable( rownames = FALSE )
+
+chisq_res <- map( chisq_tab, chisq.test )
+
+ras_group_N <- colData( se_t ) %>%
+    as.data.frame( ) %>%
+    group_by( RAS84 ) %>%
+    summarize( N = n( ) )
+
+plotdat <- colData( se_t )[, c( "RAS84", "amino" ) ] %>%
+    as.data.frame( ) %>%
+    filter( amino %in% c( "p.G12A", "p.G12C", "p.G12D",
+                         "p.G12R", "p.G12S", "p.G12V",
+                         "p.G13C", "p.G13D", "p.Q61H",  "p.Q61L" ) ) %>%
+    droplevels( ) %>%
+    group_by( RAS84 , amino ) %>%
+    summarize( n = n( ) ) %>%
+    left_join( ras_group_N, by = "RAS84" ) %>%
+    mutate( percentage = n / N * 100 )
+
+gg <- ggplot( plotdat, aes( x = RAS84, y = percentage, group = amino, fill = amino ) ) +
+    geom_bar( stat = "identity" ,color = "grey" ) +
+  labs( x = "RAS activity", y = "% KRAS mutation type", fill = "KRAS mutation" ) +
+  plot_formatter( )
+
+gg <- gg + theme( axis.text.x = element_text( angle = 90, hjust = 0.95 ) ) +
+    theme( text = element_text( size = 12 ) ) +
+    theme( legend.position = "right" )
+print( gg )
+```
+
+# RAS activity group characterisation
+
+Here we produe a heatmap highlighting the alteration characterisation
+of the five RAS activity groups.
+
+```{r rasact_charact}
+df <- data.frame( KRAS = c( -1, +1, 0, 0 ,0 ),
+                 EGFR = c( 0, -1, +1, +1, -1 ),
+                 STK11 = c( 0, +1, -1, -1, 0 ),
+                 KEAP1 = c( +1, +1, -1, -1, 0 ),
+                 RB1 = c( +1, 0, 0, 0, 0 ),
+                 TP53 = c( +1, -1, 0, 0, 0 ),
+                 ATM = c( 0, +1, 0, 0, 0 ),
+                 CTNNB1 = c( +1, 0, 0, 0, 0 ),
+                 CDKN2A = c( 0, 0, 0, 0, +1 ),
+                 row.names = levels( se_t$RAS84 ) )
+
+
+hm <- Heatmap( as.matrix( df ),
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              rect_gp = gpar(col = "grey" ),
+              col = c( my_blue, "white", my_red ),
+              show_heatmap_legend = FALSE,
+              row_split = c( 1,2,3,4,5 ) )
+print( hm )
+pdf( file = file.path( adat$plot.path, "sample_class_heatmap.pdf" ),
+    height = 3, width = 4 )
+print( hm )
+dev.off( )
+```
+

@@ -1,0 +1,1152 @@
+---
+title: "RAS signature Survival Analysis Validation : Project 002"
+author: "philip.east@crick.ac.uk"
+date: "12/02/2019"
+output: 
+  html_document:
+   code_folding: hide
+   df_print: tibble
+   toc: true
+   toc_depth: 5
+   toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE,warning=FALSE,message=FALSE)
+```
+
+Survival analysis across TCGA LUAD RAS activity groups.
+
+```{r}
+library( affy )
+library( limma )
+library( org.Hs.eg.db )
+library( pheatmap )
+library( clusterProfiler )
+library( survival )
+library( gplots )
+library( ggplot2 )
+library( xlsx )
+library( survminer )
+library( DESeq2 )
+library( dplyr )
+library( GEOquery )
+library( tibble )
+library( tidyverse )
+library( DT )
+library( Seurat )
+library( ComplexHeatmap )
+library( circlize )
+library( ggrepel )
+library( openxlsx )
+library( rms )
+library( caret )
+library( vcd )
+library( coxphMIC )
+library( patchwork )
+
+source( "/camp/stp/babs/working/eastp/code/R/R.packages.east01.functions.R")
+source( "../../scripts/lib.Ras_HighLow.335.R" )
+source( "../../scripts/lib.CCLE.335.R" )
+
+my_grey <- "#707173"
+my_red <- "#e3001a"
+my_orange <- "#f6ad6e"
+my_green <- "#7ab51d"
+my_lightgreen <- "#adcf82"
+my_purple <- "#bb90bd"
+my_blue <- "#4066aa"
+
+adat <- project.init( file.path( "survival" ) )
+
+plot_formatter <- function() {
+    theme_bw( ) +
+        theme( panel.grid.major = element_blank( ),
+               panel.grid.minor = element_blank( ),
+               panel.border = element_blank( ),
+               panel.background = element_blank( ),
+               axis.line = element_line(color = "black"),
+               axis.line.x = element_line(color="black", size = 0.1 ),
+               axis.line.y = element_line(color="black", size = 0.1 ),
+               text = element_text( size = 10 ) )
+}
+```
+
+# Introduction
+
+Here we run survival analyses across five RAS activity patient groups
+(RSG - RAS Signature Group) and a continuous per patient measure of
+RAS activity (RSI - RAS Signature Index value) previously dervied from
+TGCA LUAD and Uppsala adenocarcinoma 
+[GSE81089](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE81089)
+cohorts. We show a significant association between an increase in RAS
+activity and poor outcome in the TGCA and Uppsala cohorts. In the Uppsala
+cohort we show a significant association after correcting for clincal
+factors known to be associated with outcome via multivariate Cox
+proportional hazard modeling.
+
+# TCGA LUAD cohort
+
+Here we run a univariate coxph proportional hazard analysis on TCGA
+LUAD patient overall survival data. We test RSG and RSI as predictors
+of overall survival in these patients. 
+
+## Data
+
+Here we read in preprocessed LUAD data as a SummarizedExperiment object.
+
+```{r data}
+se_t_file <- file.path( "data", "se_t.rds" )
+se_t <- readRDS( se_t_file )
+
+SIG_HOME <- file.path( "data", "signatures" )
+krasSigNames <- sub( "\\.csv", "", dir( SIG_HOME ) )
+signatures <- lapply( krasSigNames, function( sigFile ) {
+    read.table( file = file.path( SIG_HOME, paste( sigFile, "csv", sep = "." ) ),
+               sep = "\t", stringsAsFactors = FALSE )[, 1 ]
+} ) %>% setNames( make.names( krasSigNames ) )
+RAS84_signature_map <- read.xlsx( file.path( "data", "RAS84_feature_map.xlsx" ) )
+signatures$RAS4 <- RAS84_signature_map$TCGA_gene_symbol
+```
+
+## Survival analysis
+
+We run a univariate coxph proportional hazard analysis against RSG and
+RSI. The results are shown below.
+
+The clinical data available with TCGA cohorts is limited, limiting the
+possibility to run a multivariate analysis. There is stage data for
+all patients and smoking status and age are only known in 225/502 patients.
+
+```{r survival_data_TCGA}
+pdat <- colData( se_t ) %>%
+    as.data.frame( )
+
+colData( se_t ) <- pdat %>%
+    mutate( OS = OS ) %>%
+    mutate( OS.Time = OS.Time ) %>%
+    mutate( PFS = PFI )%>%
+    mutate( PFS_time = PFI.Time)%>%
+    mutate( age = pdat$subtype_Age.at.diagnosis ) %>%
+    mutate( sex = pdat$gender ) %>%
+    mutate( tumour_stage = pdat$tumor_stage ) %>%
+    mutate( stage_123 = ifelse( grepl( "iv", tumour_stage ), "IV",
+                        ifelse( grepl( "iii", tumour_stage ), "III",
+                        ifelse( grepl( "ii", tumour_stage ), "II",
+                        ifelse( grepl( "i", tumour_stage ), "I", tumour_stage ) ) ) ) ) %>%
+    DataFrame( row.names = .$rowname )
+
+write.xlsx( colData( se_t )[, c( "RAS84" , "ras_index", "MUT.KRAS", "OS", "OS.Time" ) ],
+           file = file.path( adat$analysis.path, "TCGA_LUAD_survival_data.xslx" ) )
+```
+
+## RAS-pathway vs RAS84 in the context of RAS-pathway
+
+Here we compare the RAS84 and RAS pathway patient classifications in
+the context of both RAS84 and RAS pathway classes. We compared OS
+of patients assigned the same class by the two signatures to
+those assigned different classes in the context of the RAS pathway
+classifications. We further stratified the patients based on their RAS
+mutation status.
+	
+```{r rag4_diffclass_ras-pathway}
+misclass_df <- colData( se_t ) %>%
+    as.data.frame( ) %>%
+    mutate( advanced = ifelse( stage_123 %in% c( "III", "IV" ), "advanced", "not_advanced" ) ) %>%
+    dplyr::select( MUT.KRAS, RAS84, Loboda, OS.Time, OS, stage_123, sex, age, advanced ) %>%
+    filter( Loboda == "RAG-4" ) %>%
+    mutate( Loboda_classified = RAS84 == Loboda ) %>%
+    droplevels( ) %>%
+    unite( KRAS_RAGclass, MUT.KRAS, Loboda_classified, remove = FALSE ) %>%
+    unite( sex_RAGclass, sex, Loboda_classified, remove = FALSE ) %>%
+    unite( stage_RAGclass, stage_123, Loboda_classified, remove = FALSE ) %>%
+    unite( advanced_RAGclass, advanced, Loboda_classified, remove = FALSE ) %>%
+    mutate( KRAS_RAGclass = factor( KRAS_RAGclass ) ) %>%
+    mutate( KRAS_RAGclass = relevel( KRAS_RAGclass, "FALSE_FALSE" ) ) %>%
+    mutate( stage_RAGclass = factor( stage_RAGclass ) ) %>%
+    mutate( stage_RAGclass = relevel( stage_RAGclass, "III_FALSE" ) ) %>%
+    mutate( sex_RAGclass = factor( sex_RAGclass ) ) %>%
+    mutate( sex_RAGclass = relevel( sex_RAGclass, "male_FALSE" ) ) %>%
+    mutate( advanced_RAGclass = factor( advanced_RAGclass ) ) %>%
+    mutate( advanced_RAGclass = relevel( advanced_RAGclass, "advanced_FALSE" ) )
+
+tab <- misclass_df %>%
+    dplyr::select( sex, Loboda_classified ) %>%
+    table( )
+
+coxph( Surv( OS.Time, OS ) ~ Loboda_classified, misclass_df ) 
+coxph( Surv( OS.Time, OS ) ~ KRAS_RAGclass, misclass_df ) 
+coxph( Surv( OS.Time, OS ) ~ sex_RAGclass, misclass_df ) 
+coxph( Surv( OS.Time, OS ) ~ stage_RAGclass, misclass_df )
+coxph( Surv( OS.Time, OS ) ~ advanced_RAGclass, misclass_df )
+
+misclass_df_plot <- misclass_df %>%
+    filter( KRAS_RAGclass != "TRUE_FALSE" ) %>%
+    droplevels( )
+coxph( Surv( OS.Time, OS ) ~ Loboda_classified, misclass_df_plot ) 
+
+fit <- survfit( Surv( OS.Time/365*12, OS ) ~ Loboda_classified, misclass_df_plot )
+gg <- ggsurvplot( fit, data = misclass_df_plot )
+png( file = "kmplot_misclass_krasmutneg_df.png" )
+print( gg )
+dev.off()
+
+misclass_df_plot <- misclass_df %>%
+    filter( stage_123 == "III" ) %>%
+    droplevels( )
+fit <- survfit( Surv( OS.Time/365*12, OS ) ~ stage_RAGclass, misclass_df_plot )
+gg <- ggsurvplot( fit, data = misclass_df_plot, pval = TRUE,
+                 legend.labs = c( "different", "agreement") )
+
+cairo_pdf( file = "kmplot_misclass_stageIII_df.pdf",
+          width = 4, height = 4)
+print( gg )
+dev.off()
+```
+
+```{r rag4_raspathway_miss_vs_rag4_ras84}
+OS_rag4_missdat <- list( raspathway = misclass_df %>%
+                             filter( KRAS_RAGclass == "FALSE_FALSE" ),
+                        ras84 = colData( se_t ) %>%
+                            as.data.frame( ) %>%
+                            dplyr::select( MUT.KRAS, RAS84, Loboda, OS.Time, OS, stage_123, sex, age ) %>%
+                            filter( RAS84 == "RAG-4" ) ) %>%
+    bind_rows( .id = "signature" )
+
+coxph( Surv( OS.Time, OS ) ~ signature, OS_rag4_missdat ) 
+```
+
+## RAS-pathway vs RAS84 in the context of RAS84
+
+We carried out the same analysis as above in the context of RAS84
+classification. We were unable to find a significant association with
+OS across these groups.
+
+```{r rag4_diffclass_ras84}
+misclass_df <- colData( se_t ) %>%
+    as.data.frame( ) %>%
+    dplyr::select( MUT.KRAS, RAS84, Loboda, OS.Time, OS, stage_123, sex, age ) %>%
+    filter( RAS84 == "RAG-4" ) %>%
+    mutate( RAS84_classified = RAS84 == Loboda ) %>%
+    droplevels( ) %>%
+    unite( KRAS_RAGclass, MUT.KRAS, RAS84_classified, remove = FALSE ) %>%
+    unite( sex_RAGclass, sex, RAS84_classified, remove = FALSE ) %>%
+    unite( stage_RAGclass, stage_123, RAS84_classified, remove = FALSE ) %>%
+
+    mutate( KRAS_RAGclass = factor( KRAS_RAGclass ) ) %>%
+    mutate( KRAS_RAGclass = relevel( KRAS_RAGclass, "TRUE_FALSE" ) ) %>%
+    mutate( stage_RAGclass = factor( stage_RAGclass ) ) %>%
+    mutate( stage_RAGclass = relevel( stage_RAGclass, "III_FALSE" ) )
+
+tab <- misclass_df %>%
+    dplyr::select( MUT.KRAS, stage_123 ) %>%
+    table( )
+
+coxph( Surv( OS.Time, OS ) ~ RAS84_classified, misclass_df ) 
+coxph( Surv( OS.Time, OS ) ~ KRAS_RAGclass, misclass_df ) 
+coxph( Surv( OS.Time, OS ) ~ sex_RAGclass, misclass_df ) 
+
+misclass_df <- misclass_df %>%
+    mutate( stage_RAGclass = relevel( stage_RAGclass, "III_FALSE" ) )
+coxph( Surv( OS.Time, OS ) ~ stage_RAGclass, misclass_df )
+misclass_df <- misclass_df %>%
+    mutate( stage_RAGclass = relevel( stage_RAGclass, "II_FALSE" ) )
+coxph( Surv( OS.Time, OS ) ~ stage_RAGclass, misclass_df )
+misclass_df <- misclass_df %>%
+    mutate( stage_RAGclass = relevel( stage_RAGclass, "I_FALSE" ) )
+coxph( Surv( OS.Time, OS ) ~ stage_RAGclass, misclass_df )
+```
+
+## Mis-classification analysis
+
+Here we searched for clinical labels that correlate with
+samples mis-classified by RAS-pathway when compared to RAS84.
+
+```{r misclassification}
+misclass_df <- colData( se_t ) %>%
+    as.data.frame( ) %>%
+    dplyr::select( RAS84, Loboda, OS.Time, OS, stage_123, sex, age ) %>%
+    mutate( Loboda_classified = RAS84 == Loboda )
+
+coxph_raspw_res <- misclass_df %>%
+    filter( stage_123 %in% c( "I", "II", "III" ) ) %>%
+    split( .$stage_123 ) %>%
+    map( function( df ) coxph( Surv( OS.Time, OS ) ~ Loboda, df ) )
+
+coxph_ras84_res <- misclass_df %>%
+    filter( stage_123 %in% c( "I", "II", "III" ) ) %>%
+    split( .$stage_123 ) %>%
+    map( function( df ) coxph( Surv( OS.Time, OS ) ~RAS84, df ) )
+
+surv_time_gg <- misclass_df %>%
+    gather( survival_type, surv_time, -RAS84, -Loboda_classified ) %>%
+    ggplot( aes( x = RAS84, y = surv_time, color = Loboda_classified ) ) +
+    geom_boxplot( ) +
+    facet_wrap( ~survival_type, ncol = 2 )
+
+png( file = file.path( "boxplots.png" ) )
+print( surv_time_gg )
+dev.off( )
+
+misclass_surv_RAG_0_df <- misclass_df %>%
+    filter( RAS84 == "RAG-0" )
+
+coxph_res <- misclass_df %>%
+    group_split( RAS84 ) %>%
+    map( function( df ) coxph( Surv( OS.Time, OS ) ~ Loboda_classified, df ) )
+```
+```{r missclass_km}
+survplot_df <- misclass_df %>%
+    filter( stage_123 == "III" ) %>%
+    filter( RAS84 %in% c( "RAG-0", "RAG-4" ) )
+fit <- survfit( Surv( OS.Time, OS ) ~ RAS84, survplot_df )
+gg <- ggsurvplot( fit, data = survplot_df )
+png( file = "kmplot_stageIII_RAS84.png" )
+print( gg )
+dev.off( )
+
+survplots_l <- map( c( "I", "II", "III" ), function( stage ) {
+    rag_l <- map( levels( misclass_df$Loboda ), function( rag ) {
+        survplot_df <- misclass_df %>%
+            filter( stage_123 == stage ) %>%
+            filter( Loboda == rag ) %>%
+            mutate( group = paste( Loboda, Loboda_classified, sep = "." ) )
+        fit <- survfit( Surv( OS.Time, OS ) ~ group, survplot_df )
+        ggsurvplot( fit, data = survplot_df, pval = TRUE )
+    } )
+    names( rag_l ) <- levels( misclass_df$Loboda )
+    rag_l
+} )
+names( survplots_l ) <- c( "I", "II", "III" )
+
+for( s in names( survplots_l ) ) {
+    for( rag in names( survplots_l[[ s ]] ) ) {
+        path <- file.path( adat$plot.path, paste0( "kmplot", s, "_", rag, "_RAS_pathway.png" ) )
+        png( file = path )
+        print( survplots_l[[ s ]][[ rag ]] )
+        dev.off( )
+    }
+}
+
+cairo_pdf( file = file.path( adat$plot.path, paste0( i, "_RGS-0_PFS_TCGA_KM.pdf" ) ),
+          width = 4, height = 4 )
+print( gg )
+dev.off()
+```
+
+## coxphMIC TCGA
+
+Here we run coxph with lasso regression to identify the important
+covariates.
+
+```{r coxphmic_tcga}
+surv_dat <- colData( se_t ) %>%
+    as.data.frame( ) %>%
+    dplyr::select( barcode, OS, OS.Time )
+
+exprs_dat <- assays( se_t )$vst %>%
+    as.data.frame( ) %>%
+    rownames_to_column( var = "gene_id" ) %>%
+    filter( gene_id %in% RAS84_idmap$TCGA_feature_id ) %>%
+    gather( barcode, value, -gene_id ) %>%
+    mutate( gene_id = sub( "\\|.*", "", gene_id ) ) %>%
+    spread( gene_id, value ) %>%
+    column_to_rownames( var = "barcode" )
+
+surv_dat <- surv_dat %>%
+    left_join( exprs_dat, by = "barcode", suffix = c( "", "" ) ) %>%
+    filter( !is.na( OS.Time ) )
+
+fit.mic <- coxphMIC( formula = Surv( OS.Time, OS )~.-barcode, data = surv_dat, method = "BIC" )
+
+cairo_pdf( file = file.path( adat$plot.path, "coxphMIC_plot.pdf" ),
+          width = 5, height = 3 )
+print( plot( fit.mic ) )
+dev.off( )
+
+coxphMIC_genes <- fit.mic$result %>%
+    as.data.frame( ) %>%
+    rownames_to_column( var = "gene_symbols" ) %>%
+    filter( !is.na( se.beta.MIC ) ) %>%
+    pull( gene_symbols )
+saveRDS( coxphMIC_genes, file.path( adat$analysis.path, "coxphMIC_genes.rds" ) )
+
+hmcols <- colorpanel( 1000, "#4066AA", "white", "#E3001A" )
+hmmat <- assays( se_t )$vst - rowMedians( assays( se_t )$vst )
+
+hmmat_gs <- hmmat %>%
+    as.data.frame( ) %>%
+    rownames_to_column( var = "TCGA_feature_id" ) %>%
+    left_join( RAS84_idmap[, c( "TCGA_feature_id", "TCGA_gene_symbol" ) ], by = "TCGA_feature_id" ) %>%
+    dplyr::select( -TCGA_feature_id ) %>%
+    filter( TCGA_gene_symbol %in% coxphMIC_genes ) %>%
+    column_to_rownames( var = "TCGA_gene_symbol" ) %>%
+    as.matrix( )
+
+hm <- Heatmap( hmmat_gs,
+              name = "Expression", 
+              clustering_method_rows = "ward.D2",
+              clustering_method_columns = "ward.D2",
+              show_column_names = FALSE,
+              show_row_names = TRUE,
+              col = colorRamp2(
+                  seq( from = -3, to = 3, length.out = length( hmcols ) ),
+                  hmcols ),
+              ##column_split = se_t$RAS84,
+              row_gap = unit( 1, "mm" ),
+              column_title = "coxphMIC 11 genes",
+              column_title_gp = gpar( fontsize = 14 ),
+              column_names_gp = gpar( fontsize = 8 ),
+              show_heatmap_legend = FALSE,
+              cluster_row_slices = FALSE,
+              row_names_max_width = unit( 10, "mm" ) )
+
+cairo_pdf( file = file.path( adat$plot.path, "coxphMIC_11genes_heatmap.pdf" ),
+          width = 8, height = 3 )
+print( hm )
+dev.off( )
+
+write( coxphMIC_genes, file = file.path( adat$analysis.path, "coxphMIC_11genes.txt" ) )
+```
+```{r MIC_RI}
+ri_mic <- data.frame(
+    barcode = rownames( exprs_dat ),
+    ri_mic = rowMeans( exprs_dat[, coxphMIC_genes ] ) ) %>%
+    left_join( as.data.frame( colData( se_t )[, c( "barcode", "ras_index", "RAS84" ) ] ), by = "barcode" )
+
+scatter_gg <- ri_mic %>%
+    ggplot( aes( x = ras_index, y = ri_mic ) ) +
+    geom_point()
+
+bw_gg <- ri_mic %>%
+    ggplot( aes( x = RAS84, y = ri_mic ) ) +
+    geom_boxplot() +
+    plot_formatter() +
+    theme( axis.text.x = element_text( angle = 90, vjust = 0.5, hjust =1 ) )
+
+cairo_pdf( file = file.path( adat$plot.path, "coxphMIC_11_genes_boxplots_TCGA.pdf" ),
+          width = 2, height = 3 )
+print( bw_gg )
+dev.off()
+```
+
+## RAS activity coxph analysis
+
+Here we build the coxph model using overall survival data and RSG.
+
+```{r coxph_rasact_tcga}
+se_t <- se_t[, !is.na( se_t$OS.Time ) & !is.na( se_t$OS ) ]
+RSG_OS_n <- table( se_t$RAS84 )
+coxph_fit_OS_rasact_tcga <- coxph( Surv( OS.Time, OS ) ~ RAS84, colData( se_t ) )
+coxph_fit_PFS_rasact_tcga <- coxph( Surv( PFS_time, PFS ) ~ RAS84, colData( se_t ) )
+
+coxph_fit_OS_sigs_l <- map( names( sig_name_map ), function( sig ) {
+    form <- as.formula( paste( "Surv( OS.Time, OS ) ~", sig ) )
+    coxph( form, colData( se_t ) )
+} )
+names( coxph_fit_OS_sigs_l ) <- names( sig_name_map )
+
+coxph_fit_PFS_sigs_l <- map( names( sig_name_map ), function( sig ) {
+    form <- as.formula( paste( "Surv( PFS_time, PFS ) ~", sig ) )
+    coxph( form, colData( se_t ) )
+} )
+names( coxph_fit_PFS_sigs_l ) <- names( sig_name_map )
+
+res <- map( coxph_fit_OS_sigs_l, function( fit ) {
+    summary( fit )$coef[, 5 ] %>%
+                     as.data.frame( ) %>%
+                     rownames_to_column( var = "group" ) %>%
+                     mutate( RAG = paste0( "RAG-", 1:4 ) )
+} ) %>%
+    bind_rows( ) %>%
+    mutate( signature = sub( "RAG-\\d", "", group ) ) %>%
+    rename( pval = 2 )
+write.xlsx( res, file.path( adat$analysis.path, "coxph_fit_OS_allsigs.xlsx" ) )
+```
+
+
+### OS Results table
+
+```{r table_OS_coxph_rasact_tcga}
+format_coxph <- function( coxph_fit, factor_name = "" ) {
+    res_coef <- as.data.frame( summary( coxph_fit )$coef ) %>%
+        rownames_to_column( var = "predictor" ) %>%
+        mutate( predictor = sub( factor_name, "", predictor ) ) %>%
+        rename( HR = 3, pvalue = 6 )
+    res_conf <- as.data.frame( summary( coxph_fit )$conf.int ) %>%
+        rownames_to_column( var = "predictor" ) %>%
+        mutate( predictor = sub( factor_name, "", predictor ) ) %>%
+        rename( lower_95 = 4, upper_95 = 5 )
+    res_coef %>%
+        left_join( res_conf, by = "predictor" ) %>%
+        select( predictor, coef, HR, pvalue, lower_95, upper_95 ) %>%
+        gather( type, value, -predictor ) %>%
+        mutate( value = signif( value, 4 ) ) %>%
+        spread( type, value ) %>%
+        select( predictor, coef, HR, pvalue, lower_95, upper_95 )
+}
+
+format_coxph( coxph_fit_OS_rasact_tcga, factor_name = "RAS84" ) %>%
+    mutate( RSG_test_n = RSG_OS_n[ -1 ], RSG_control_n = RSG_OS_n[ 1 ] ) %>%
+    datatable( rownames = FALSE )
+```
+
+### OS Kaplan-Meiers {.tabset .tabset-fade}
+
+```{r km_OS_rasact_tcga,results='asis',echo=FALSE}
+cat( "#### All RAS activity groups\n" )
+fit <- survfit( Surv( OS.Time, OS ) ~ RAS84, colData( se_t ) )
+gg <- ggsurvplot( fit, data = colData( se_t ), pval = TRUE )
+print( gg ) 
+cat ( " \n\n" )
+for( i in levels(  se_t$RAS84 )[ -1 ] ) {
+    cat( "#### ", i, "\n" )
+    f <- se_t$RAS84 %in% c( "RSG_0", i )
+    fit <- survfit( Surv( OS.Time/365*12, OS ) ~ RAS84, colData( se_t )[ f, ] )
+    gg <- ggsurvplot( fit, data = colData( se_t )[ f, ],
+                     palette = c( my_blue, my_red ), pval = TRUE )
+    print( gg )
+    cairo_pdf( file = file.path( adat$plot.path, paste0( i, "_RGS-0_OS_TCGA_KM.pdf" ) ),
+              width = 4, height = 4 )
+    print( gg )
+    dev.off()
+    cat( " \n\n" )
+}
+```
+
+## RAS index coxph analysis
+
+Here we fit a univariate cox proportional hazard regression model to
+the RSI, a continuous variable measuring tumour RAS
+pathway activity. We found a significant positive association with
+outcome, showing increased RAS84 activity is a predictor of poor
+outcome. To visualise the ability of RSI to predict survival we
+used the model to predict survival time given a two-fold increase or
+decrease in RSI. These predictions are shown in the KM plot below
+(high RSI in red, low in blue).
+
+```{r coxph_rasindex_tcga}
+coxph_fit_OS_rasindex_tcga <- coxph( Surv( OS.Time/365*12, OS ) ~ ras_index, colData( se_t ) )
+coxph_fit_PFS_rasindex_tcga <- coxph( Surv( PFS_time/365*12, PFS ) ~ ras_index, colData( se_t ) )
+```
+
+### OS Results table
+
+```{r table_coxph_OS_rasindex_tcga}
+format_coxph( coxph_fit_OS_rasindex_tcga ) %>%
+    datatable( rownames = FALSE )
+```
+
+### OS Kaplan Meier
+
+```{r km_OS_rasindex_tcga,results='hide'}
+surv_l <- list( mid = survfit( coxph_fit_OS_rasindex_tcga,
+                              newdata = data.frame( ras_index = mean( se_t$ras_index) ),
+                              data = as.data.frame( colData( se_t ) ) ),
+               upper = survfit( coxph_fit_OS_rasindex_tcga,
+                               newdata = data.frame( ras_index = mean( se_t$ras_index ) + 1 ),
+                               data = as.data.frame( colData( se_t ) ) ),
+               lower = survfit( coxph_fit_OS_rasindex_tcga,
+                               newdata = data.frame( ras_index = mean( se_t$ras_index ) - 1 ),
+                               data = as.data.frame( colData( se_t ) ) ) )
+gg <- ggsurvplot( surv_l,
+                 combine = TRUE,
+                 palette = c( my_grey, my_red, my_blue ) )
+print( gg )
+cairo_pdf( file = file.path( adat$plot.path, "ras_index_OS_TCGA_KM.pdf" ),
+          width = 4, height = 4 )
+print( gg )
+dev.off( )
+```
+
+## RAS index ~ KRAS mutation coxph analysis
+
+Here we split the patients into high.medium,low and KRAS mutation +-
+and run a univariate coxph analysis.
+
+```{r km_OS_rasindex_krasmut_tcga}
+colData( se_t )$ri_kras <- paste( cut( se_t$ras_index,
+                                      breaks = 3,
+                                      labels = c( "low", "med", "high" ) ),
+                                 se_t$MUT.KRAS, sep = "_" )
+colData( se_t )$rasindex_krasmut <- factor( colData( se_t )$rasindex_krasmut )
+
+## vs low_FALSE
+colData( se_t )$rasindex_krasmut <- relevel( colData( se_t )$rasindex_krasmut, "low_FALSE" )
+coxph_fit_OS_rasindex_krasmut_tcga <- coxph( Surv( OS.Time, OS ) ~ rasindex_krasmut, colData( se_t ) )
+
+## vs low_TRUE
+colData( se_t )$rasindex_krasmut <- relevel( colData( se_t )$rasindex_krasmut, "low_TRUE" )
+coxph_fit_OS_rasindex_krasmut_tcga <- coxph( Surv( OS.Time, OS ) ~ rasindex_krasmut, colData( se_t ) )
+
+## vs high_FALSE
+colData( se_t )$rasindex_krasmut <- relevel( colData( se_t )$rasindex_krasmut, "high_FALSE" )
+coxph_fit_OS_rasindex_krasmut_tcga <- coxph( Surv( OS.Time, OS ) ~ rasindex_krasmut, colData( se_t ) )
+
+
+fit <- survfit( Surv( OS.Time/365*12, OS ) ~ ri_kras, colData( se_t ) )
+gg <- ggsurvplot( fit, data = colData( se_t ), pval = TRUE )
+
+cairo_pdf( file = file.path( adat$plot.path, "ras_index_krasmut_OS_TCGA_KM.pdf" ),
+           width = 5, height = 5 )
+print( gg )
+dev.off( )
+```
+
+## Parent signatures
+
+Here we run a survival analysis against the RSGs derived from other
+RAS signatures used to derive RAS84 which was used to drive the RSGs
+and RSI usng here.
+
+```{r survival_parent_sigs}
+parent_sigs <- c( "Bild.Nevins", "KRAS_msigdb_HM",
+                  "Loboda", "SweetCordero", "RAS84" )
+
+uvsur_res_l <- map( parent_sigs, function( s ) {
+    coxph( as.formula( paste( "Surv( OS.Time, OS ) ~",  s ) ), colData( se_t ) )
+} ) %>%
+    map( format_coxph )
+names( uvsur_res_l ) <- parent_sigs
+
+results <- list( uvsurv_RSG_TCGA = uvsur_res_l %>%
+                     bind_rows( .id = "signature" ) %>%
+                     select( signature, predictor, HR, lower_95, upper_95, pvalue ) %>%
+                     mutate( signature = factor( signature, levels = c( "RAS84", parent_sigs[ -5 ] ) ) ) %>%
+                     mutate( predictor = sub( ".*RAG", "RAG", predictor ) ) )
+
+plotdat <- results$uvsurv_RSG_TCGA
+uvsurv_gg <- ggplot( plotdat,
+                    aes( x = HR, y = -log10( pvalue ), color = signature, label = predictor ) ) +
+    geom_point( size = 2 ) +
+    geom_point( data = subset( plotdat, signature == "RAS84" ),
+               aes( x = HR, y = -log10( pvalue ) ),
+               size = 3 ) +
+    geom_text_repel( data = subset( plotdat, pvalue < 0.05 ),
+                    aes( x = HR, y = -log10( pvalue ), label = predictor ) ) +
+    geom_hline( yintercept = -log10( 0.05 ), color = my_orange, linetype = "dashed" ) +
+    plot_formatter( )
+
+print( mv_surv_gg )
+cairo_pdf( file = file.path( adat$plot.path, "uvcox_parent_sigs_volcano.pdf" ),
+           width = 5, height = 4 )
+print( uvsurv_gg )
+dev.off( )
+```
+
+# Uppsala cohort
+
+[GSE81089](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE81089)
+ 
+Fresh frozen tumor tissue from 199 patients diagnosed with NSCLC and surgically treated 2006-2010 at the Uppsala University Hospital, Uppsala, Sweden and 19 paired normal lung tissues. Clinical data were retrieved from the regional lung cancer registry
+
+First we load signature gene lists so we can classify the Uppsala data.
+
+```{r signatures}
+SIG_HOME <- file.path( "..", "..", "data", "signatures", "ras", "active" )
+signatures_raw <- init.signatures()
+
+load( file = file.path( "..", "..", "analysis", "validate_signatures", "CCLE", "LUNG", "signatures_filtered.rda" ) )
+
+signatures_raw$RAS84 <- signatures$RAS84
+```
+
+Here we read in the Uppsala expression and clinical data and create a
+SummarizedExperiment object. Annotation is obtained form BioMart.
+
+```{r uppsala,fig.width=4,fig.height=3}
+se_uppsala <- readRDS( file = file.path( "data" "GSE81089_se.rds" )
+```
+
+## Survival data
+
+We run univariate and multivariate coxph proportional hazard analysis against RSGs and
+RSI values. The multivariate details are explained below. 
+
+We first clean up the clinical data column headers and labels.
+
+Stage according to pTNM: 1=1a 2=1b 3=2a 4=2b 5=3a 6=3b 7=IV
+Smoking history : 1=current 2=ex >1year 3=never
+
+We calculate the overall survival time as the differene between the
+data of surgery and the reported vital date.
+
+```{r survival_data_uppsala}
+surv_time <- difftime( strptime( se_uppsala$'vital date:ch1',
+                                 format = "%Y-%m-%d"),
+                       strptime( se_uppsala$'surgery date:ch1',
+                                format = "%Y-%m-%d"), units = "weeks" )
+pdat <- colData( se_uppsala ) %>%
+    as.data.frame( )
+stage_map <- c( "I", "I", "II", "II", "III", "III", "IV" )
+smoking_map <- c( "current", "ex >1year", "never" )
+colData( se_uppsala ) <- pdat %>%
+    mutate( OS = as.numeric( pdat$'dead.ch1' ) ) %>%
+    mutate( OS_time = surv_time )%>%
+    mutate( age = as.numeric( pdat$'age.ch1' ) ) %>%
+    mutate( sex = pdat$'gender.ch1' ) %>%
+    mutate( stage = stage_map[ as.numeric( pdat$'stage.tnm.ch1' ) ] ) %>%
+    mutate( ps.who = as.character( pdat$ps.who.ch1 ) ) %>%
+    mutate( smoking = factor( smoking_map[ as.numeric( pdat$smoking.ch1 ) ],
+                             levels = smoking_map[ 3:1 ] ) ) %>%
+    DataFrame( row.names = .$title )
+se_uppsala <- se_uppsala[ , se_uppsala$stage != "IV" ]
+```
+
+## Histology
+
+This is a mixed histology cohort. We are only interested in the
+andenocarcinomas. Here we select these tumours. Column `se_uppsala$histology:ch1 == 2`. 
+
+(1=squamous cell cancer 2=AC unspecified 3=Large cell/ NOS)
+
+```{r filter_luad_uppsala,fig.width=4,fig.height=3}
+hist_label <- c( "squamous", "LUAD", "Large cell" ) 
+histology_gg <- colData( se_uppsala ) %>%
+    as.data.frame( ) %>%
+    mutate( histology_label = hist_label[ as.numeric( se_uppsala$'histology.ch1' ) ] ) %>%
+    ggplot( aes( x = histology_label, fill = histology_label ) ) +
+    geom_bar( position = "dodge" ) +
+    theme( axis.text.x = element_text( angle = 90, hjust = 1 ) )
+print( histology_gg )
+se_uppsala <- se_uppsala[, se_uppsala$'histology.ch1' == 2 ]
+se_uppsala
+```
+
+## Correct gene symbol mappings for RAS84
+
+There are mapping issues with four genes when mapping the Uppsala
+annotation to RAS84. 
+
+* Uppsala -> RAS84
+--------------------
+* RESF1 -> C12orf35
+* FAM241A -> C4orf32
+* CXCL8 -> IL8
+* ITPRID2 -> SSFA2
+
+We change the Uppsala annotation to make it compatible with RAS84.
+
+IER3 maps to multiple features in the Uppsala annotation. We select
+ENSG00000137331 as the primary feature for IER3.
+
+```{r ras84_uppsala}
+se_uppsala_ras84 <- se_uppsala[ RAS84_idmap$Uppsala_feature_ids, ]
+rowData( se_uppsala_ras84 ) <- rowData( se_uppsala_ras84 ) %>%
+    as.data.frame( ) %>%
+    left_join( RAS84_idmap[, c( "Uppsala_feature_ids", "TCGA_gene_symbol", "svm" ) ], by = c( "ensembl_gene_id" = "Uppsala_feature_ids" ) )
+
+signatures_ensembl <- map( signatures_raw, function( sig ) {
+    rowData( se_uppsala ) %>%
+        as.data.frame( ) %>%
+        filter( external_gene_name %in% sig ) %>%
+        pull( ensembl_gene_id )
+} )
+signatures_ensembl$RAS84 <- RAS84_idmap$Uppsala_feature_ids
+```
+
+## CoxphMIC
+
+```{r coxphmic_uppsala}
+surv_dat <- colData( se_uppsala_ras84 ) %>%
+    as.data.frame( ) %>%
+    dplyr::select( title, OS, OS_time )
+
+exprs_dat <- assays( se_uppsala_ras84 )$vst %>%
+    as.data.frame( ) %>%
+    rownames_to_column( var = "Uppsala_feature_ids" ) %>%
+    left_join( RAS84_idmap[, c( "Uppsala_feature_ids", "TCGA_gene_symbol" ) ], by = "Uppsala_feature_ids" ) %>%
+    dplyr::select( -Uppsala_feature_ids ) %>%
+    gather( title, value, -TCGA_gene_symbol ) %>%
+    spread( TCGA_gene_symbol, value )
+
+surv_dat <- surv_dat %>%
+    left_join( exprs_dat, by = "title", suffix = c( "", "" ) ) %>%
+    filter( !is.na( OS_time ) )
+
+fit.mic <- coxphMIC( formula = Surv( OS_time, OS )~.-title, data = surv_dat, method = "BIC" )
+
+cairo_pdf( file = file.path( adat$plot.path, "coxphMIC_plot_uppsala.pdf" ),
+          width = 5, height = 3 )
+print( plot( fit.mic ) )
+dev.off( )
+
+coxphMIC_genes <- fit.mic$result %>%
+    as.data.frame( ) %>%
+    rownames_to_column( var = "gene_symbols" ) %>%
+    filter( p.value < 0.05 ) %>%
+    pull( gene_symbols )
+```
+
+## Clusters
+
+We cluster the tumours into five groups using the VST expression
+data across the RAS84 and published RAS expression signatures. We also
+calculate a per-patient RSI value for RAS84.
+
+```{r clustering_uppsala}
+RSG_labels <- c( "RSG-0", "RSG-1", "RSG-2", "RSG-3", "RSG-4" )
+cluster_no <- 5
+RSG_l <- lapply( signatures_ensembl, function( sig_genes ) {
+    sig_f <- rowData( se_uppsala )$ensembl_gene_id %in% sig_genes
+    se_local <- se_uppsala[ sig_f, ]
+    hc <- hclust( dist( t( assays( se_local )$vst ) ), method = "ward.D2" )
+    ct <- cutree( hc, k = cluster_no )
+    ct_df <- data.frame( cluster = ct, title = names( ct ) )
+    ct_means <- assays( se_local )$vst %>%
+                                 as.data.frame( ) %>%
+                                 gather( title, value ) %>%
+                                 left_join( ct_df, by = "title" ) %>%
+                                 group_by( cluster ) %>%
+                                 dplyr::summarize( ct_mean = mean( value ) ) %>%
+                                 arrange( ct_mean ) %>%
+                                 mutate( RSG = factor( RSG_labels, levels = RSG_labels ) )
+    ct_df %>%
+        left_join( ct_means, by = "cluster" ) %>%
+        select( title, RSG )
+} )
+
+RSG_df <- map( RSG_l, function( x ) x$RSG ) %>%
+    bind_cols( ) %>%
+    as.data.frame( )
+RSG_df$title <- RSG_l[[ 1 ]]$title
+
+colData( se_uppsala ) <- colData( se_uppsala ) %>%
+    as.data.frame( ) %>%
+    left_join( RSG_df, by = "title" ) %>%
+    DataFrame( row.names = .$title )
+
+ras84_sig_f <- rowData( se_uppsala )$ensembl_gene_id %in% signatures_ensembl$RAS84
+se_uppsala$ras_index <- colMeans( assays( se_uppsala )$vst[ ras84_sig_f, ] )
+```
+
+### Heatmap
+
+Heatmap showing the clustering of the Uppsala patients using RAS84.
+
+```{r heatmap_uppsala,fig.width=12,fig.height=8}
+se_uppsala_ras84 <- se_uppsala[ ras84_sig_f, ]
+hmcols <- colorpanel( 1000, "#4066AA", "white", "#E3001A" )
+hmmat <- assays( se_uppsala_ras84 )$vst - rowMedians( assays( se_uppsala_ras84 )$vst )
+
+hmmat_gs <- hmmat %>%
+    as.data.frame( ) %>%
+    rownames_to_column( var = "ensembl_gene_id" ) %>%
+    left_join( as.data.frame( rowData( se_uppsala ) ), by = "ensembl_gene_id" ) %>%
+    dplyr::select( -ensembl_gene_id ) %>%
+    column_to_rownames( var = "external_gene_name" ) %>%
+    as.matrix( )
+
+hm <- Heatmap( t( hmmat_gs ),
+              name = "Expression", 
+              clustering_method_rows = "ward.D2",
+              clustering_method_columns = "ward.D2",
+              show_column_names = TRUE,
+              show_row_names = FALSE,
+              col = colorRamp2(
+                  seq( from = -3, to = 3, length.out = length( hmcols ) ),
+                  hmcols ),
+              row_split = se_uppsala$RAS84,
+              row_gap = unit( 1, "mm" ),
+              column_title = "RAS84 in Uppsala",
+              column_title_gp = gpar( fontsize = 14 ),
+              column_names_gp = gpar( fontsize = 8 ),
+              show_heatmap_legend = FALSE,
+              cluster_row_slices = FALSE,
+              row_names_max_width = unit( 10, "mm" ) )
+print( hm )
+```
+
+```{r class_sig_overlap_heatmap}
+hm_dat <- RSG_df %>%
+    dplyr::select( -Singh_Settleman ) %>%
+    relocate( RAS84, .before = 1 ) %>%
+    relocate( Loboda, .before = 3 )
+    
+hm <- Heatmap( hm_dat,
+              name = "Overlap", 
+              clustering_method_rows = "ward.D2",
+              #clustering_method_columns = "ward.D2",
+              show_column_names = TRUE,
+              col = c( "grey" , "darkgreen", "purple", "orange", "black" ),
+              #colorRamp2(
+              #    seq( from = -2, to = 2, length.out = length( hmcols ) ),
+              #    hmcols ),
+              row_split = hm_dat$RAS84,
+              column_split = factor( colnames( hm_dat ), levels = colnames( hm_dat ) ),
+              column_title = sig_n,
+              column_title_gp = gpar( fontsize = 14 ),
+              column_names_gp = gpar( fontsize = 12 ),
+              heatmap_legend_param = list( title_gp = gpar( fontsize = 14 ),
+                                          labels_gp = gpar( fontsize = 12 ) ),
+              show_heatmap_legend = TRUE,
+              #cluster_row_slices = FALSE,
+              row_names_max_width = unit( 10, "mm" ) )
+png( file = "test_hm.png", width = 300 )
+print( hm )
+dev.off( )
+
+cairo_pdf( file = file.path( adat$plot.path, "signature_class_overlap.pdf" ),
+          width = 4 )
+print( hm )
+dev.off( )
+```
+
+
+## RAS activity coxph analysis
+
+Here we build the coxph model using overall survival data and RSGs
+dervied from RAS84.
+
+```{r rasact_OS_uppsala}
+RSG_uppsala_n <- table( se_uppsala$RAS84 )
+coxph_fit_rasact_uppsala <- coxph( Surv( OS_time, OS ) ~ RAS84, colData( se_uppsala ) )
+```
+
+### Results table
+
+```{r table_rasact_uppsala}
+format_coxph( coxph_fit_rasact_uppsala, factor_name = "RAS84" ) %>%
+    mutate( RSG_test_n = RSG_uppsala_n[ -1 ], RSG_control_n = RSG_uppsala_n[ 1 ] ) %>%
+    datatable( )
+```
+
+### Kaplan-Meiers {.tabset .tabset-fade}
+
+```{r km_rasact_uppsala,results='asis',echo=FALSE}
+cat( "#### All RAS actvity groups\n" )
+fit <- survfit( Surv( OS_time/52*12, OS ) ~ RAS84, colData( se_uppsala ) )
+gg <- ggsurvplot( fit, data = colData( se_uppsala ), pval = TRUE )
+print( gg ) 
+cat ( " \n\n" )
+for( i in levels( se_uppsala$RAS84 )[ -1 ] ) {
+    cat( "#### ", i, "\n" )
+    f <- se_uppsala$RAS84 %in% c( "RSG-0", i )
+    fit <- survfit( Surv( OS_time/52*12, OS ) ~ RAS84, colData( se_uppsala )[ f, ] )
+    gg <- ggsurvplot( fit, data = colData( se_uppsala )[ f, ], pval = TRUE,
+                     palette = c( my_blue, my_red ) )
+    print( gg )
+    cairo_pdf( file = file.path( adat$plot.path, paste0( i, "_RSG-0_UV_uppsala_KM.pdf" ) ),
+              width = 4, height = 4 )
+    print( gg )
+    dev.off()
+    cat( " \n\n" )
+}
+```
+
+## RAS index coxph analysis
+
+Here we fit a univariate cox proportional hazard regression model to
+the RSI, a continuous variable measuring tumour RAS
+pathway activity. We found a significant positive association with
+outcome, showing increased RAS84 activity is a predictor of poor
+outcome. To visualise the ability of RSI to predict survival we
+used the model to predict survival time given a two-fold increase or
+decrease in RSI. These predictions are shown in the KM plot below
+(high RSI in red, low in blue).
+
+```{r rasindex_OS_uppsala}
+coxph_fit_rasindex_uppsala <- coxph( Surv( OS_time/52*12, OS ) ~ ras_index, colData( se_uppsala ) )
+```
+
+### Results table
+
+```{r table_rasindex_uppsala}
+format_coxph( coxph_fit_rasindex_uppsala ) %>%
+    datatable( rownames = FALSE )
+```
+
+### Kaplan-Meier
+
+```{r km_rasindex_uppsala}
+surv_l <- list( mid = survfit( coxph_fit_rasindex_uppsala,
+                              newdata = data.frame( ras_index = mean( se_uppsala$ras_index) ),
+                              data = as.data.frame( colData( se_uppsala ) ) ),
+               upper = survfit( coxph_fit_rasindex_uppsala,
+                               newdata = data.frame( ras_index = mean( se_uppsala$ras_index ) + 1 ),
+                               data = as.data.frame( colData( se_uppsala ) ) ),
+               lower = survfit( coxph_fit_rasindex_uppsala,
+                               newdata = data.frame( ras_index = mean( se_uppsala$ras_index ) - 1 ),
+                               data = as.data.frame( colData( se_uppsala ) ) ) )
+gg <- ggsurvplot( surv_l,
+                 combine = TRUE,
+                 palette = c( my_grey, my_red, my_blue ) )
+print( gg )
+```
+```{r render_km_rasindex_uppsala,echo=FALSE,results='hide'}
+cairo_pdf( file = file.path( adat$plot.path, "ras_index_uppsalas_KM.pdf" ),
+          width = 4, height = 4 )
+print( gg )
+dev.off( )
+```
+
+## All signatures
+
+Here we run a univariate survival analysis against the RSGs derived from the
+parent signatures.
+
+```{r uv_uppsala_parent_sigs}
+parent_sigs <- c( "Bild.Nevins", "Downward_134", "KRAS_msigdb_HM",
+                  "Loboda", "SweetCordero", "RAS84" )
+
+uvsur_uppsala_res_l <- map( parent_sigs, function( s ) {
+    coxph_fit_rasact <- coxph( as.formula( paste( "Surv( OS_time, OS ) ~",  s ) ), colData( se_uppsala ) )
+    format_coxph( coxph_fit_rasact, factor_name = s )
+} )
+names( uvsur_uppsala_res_l ) <- parent_sigs
+
+results$uvsurv_RSG_uppsala <- uvsur_uppsala_res_l %>%
+    bind_rows( .id = "signature" ) %>%
+    select( signature, predictor, HR, lower_95, upper_95, pvalue )
+
+datatable( results$uvsurv_RSG_uppsala, rownames = FALSE )
+```
+
+## Multivariate survival analysis
+
+Here we carry out a multivariate survival analysis using the Uppsala
+cohort. This determines the ability of the RSGs and RSI
+to predict outcome beyond known clincail predictors of
+outcome. We test tumour stage, WHO performace score, smoking status,
+sex and age alongside RSG and RSI.
+
+### RAS activity coxph
+
+```{r multivariate_rasact}
+coxph_mv_form_bg <- as.formula( "Surv( OS_time/52*12, OS ) ~ rcs( age, 3 ) + smoking + sex + stage + ps.who" )
+coxph_mv_fit_bg <- coxph( coxph_mv_form_bg, colData( se_uppsala ) )
+
+coxph_mv_form_rasact <- as.formula( "Surv( OS_time/52*12, OS ) ~ rcs( age, 3 ) + sex + stage + ps.who + smoking + RAS84" )
+
+coxph_mv_fit_rasact <- coxph( coxph_mv_form_rasact, colData( se_uppsala ) )
+
+anova_res <- anova( coxph_mv_fit_rasact, coxph_mv_fit_bg )
+
+coxph_mv_form_rasact_forest <- as.formula( "Surv( OS_time/52*12, OS ) ~ sex + stage + ps.who + smoking + RAS84" )
+coxph_mv_fit_rasact_forest <- coxph( coxph_mv_form_rasact_forest, colData( se_uppsala ) )
+res_mvar_rasact <- format_coxph( coxph_mv_fit_rasact_forest, factor_name = "RAS84" )
+datatable( res_mvar_rasact, rownames = FALSE )
+```
+
+### RAS index coxph
+
+```{r multivariate_rasindex}
+coxph_mv_fit_rasindex <- coxph( Surv( OS_time, OS ) ~ rcs( age, 3 ) + sex + stage + ps.who + smoking + ras_index, colData( se_uppsala ) )
+res_mvar_rasindex <- format_coxph( coxph_mv_fit_rasindex )
+datatable( res_mvar_rasindex,  rownames = FALSE )
+```
+
+### RAS activity & index coxph
+
+```{r multivariate_rasact}
+coxph_mv_form_bg <- as.formula( "Surv( OS_time/52*12, OS ) ~ rcs( age, 3 ) + smoking + sex + stage + ps.who" )
+coxph_mv_fit_bg <- coxph( coxph_mv_form_bg, colData( se_uppsala ) )
+
+coxph_mv_form_ri_rasact <- as.formula( "Surv( OS_time/52*12, OS ) ~ rcs( age, 3 ) + sex + stage + ps.who + smoking + ras_index + RAS84" )
+
+coxph_mv_fit_ri_rasact <- coxph( coxph_mv_form_ri_rasact, colData( se_uppsala ) )
+
+anova_ri_rasact_res <- anova( coxph_mv_fit_ri_rasact, coxph_mv_fit_bg )
+
+coxph_mv_form_ri_rasact_forest <- as.formula( "Surv( OS_time/52*12, OS ) ~ sex + stage + ps.who + smoking + ras_index + RAS84" )
+coxph_mv_fit_ri_rasact_forest <- coxph( coxph_mv_form_ri_rasact_forest, colData( se_uppsala ) )
+res_mvar_ri_rasact <- format_coxph( coxph_mv_fit_ri_rasact_forest, factor_name = "RAS84" )
+datatable( res_mvar_ri_rasact, rownames = FALSE )
+```
+
+### Multivariate forest plot
+
+```{r mv_forest_plot}
+plotdat <- res_mvar_rasact %>%
+    mutate( pvalue = as.character( pvalue ) )
+reference_levels <- c( "RSG-0", "stageI", "ps.who.0", "smokingnever", "sexfemale" )
+add_rows <- data.frame( predictor = reference_levels, 
+                       HR = rep( 1, length( reference_levels ) ) )
+add_rows$upper.95 <- add_rows$lower.95 <- rep( 0, length( reference_levels ) )
+add_rows$pvalue <- "reference"
+
+plotdat <- bind_rows( list( plotdat, add_rows ) ) %>%
+    mutate( predictor = factor( predictor,
+                                levels = rev( c( "RSG-4", "RSG-3",
+                                                "RSG-2", "RSG-1", "RSG-0",
+                                                "stageIII", "stageII", "stageI",
+                                                "ps.who2", "ps.who1", "ps.who.0",
+                                                "smokingcurrent", "smokingex >1year", "smokingnever",
+                                                "sexmale", "sexfemale" ) ) ) )
+
+plotdat_gathered <- plotdat %>%
+    gather( interval, value, -predictor, -HR, -pvalue )
+
+gg <- ggplot( plotdat_gathered, aes( y = as.numeric( predictor ), x = HR ) ) +
+    geom_rect( data = data.frame( x1 = 0, x2 = max( plotdat$upper_95, na.rm = TRUE ),
+                                 y1 = c( 2.5, 8.5 ), y2 = c( 5.5, 11.5 ) ),
+              aes( xmin = x1, xmax = x2, ymin = y1, ymax = y2 ),
+              fill = "grey", alpha = 0.4, inherit.aes = FALSE ) +
+    geom_point( shape = 23, size = 3, fill = "black" ) +
+    geom_line( data = filter( plotdat_gathered, interval %in% c( "lower_95", "upper_95" ) ),
+              aes( y = as.numeric( predictor ), x = value, group = predictor ) ) +
+    geom_vline( xintercept = 1, linetype = "dashed" ) +
+    scale_x_continuous( breaks = c( 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32 ), trans = "log",
+                        expand = c( 0, 0) ) +
+    scale_y_continuous( breaks = 1:nrow( plotdat ), labels = levels( plotdat$predictor ),
+                       sec.axis = sec_axis( ~., breaks = 1:nrow( plotdat ),
+                                           labels = plotdat$pvalue[ order( plotdat$predictor ) ] ) ) +
+    plot_formatter( )
+
+print( gg )
+```
+
+```{r render_mv_forest_plot,results='hide'}
+cairo_pdf( file = file.path( adat$plot.path, "multivar.pdf" ), width = 6, height = 3 )
+print( gg )
+dev.off( )
+```
+
+### All signatures
+
+Here we run the multivariate analysis against the parent signature
+clusterings. We find that RAS84 is the only signature to produce RGSs
+with progostic qualities beyond traditional clinical markers. 
+
+```{r mv_uppsala_parent_sigs}
+mvsur_uppsala_res_l <- map( parent_sigs, function( sig_n ) {
+    form_string <- paste( "Surv( OS_time/52*12, OS ) ~ age + sex + stage + ps.who + smoking +", sig_n )
+    coxph_form <- as.formula( form_string )
+    coxph_fit <- coxph( coxph_form, colData( se_uppsala ) )
+    format_coxph( coxph_fit, factor_name = sig_n )
+} )
+names( mvsur_uppsala_res_l ) <- parent_sigs
+
+results$mvsurv_RSG_uppsala <- mvsur_uppsala_res_l %>%
+    bind_rows( .id = "signature" ) %>%
+    filter( grepl( "RSG", predictor ) ) %>%
+    select( signature, predictor, HR, lower_95, upper_95, pvalue ) %>%
+    mutate( signature = factor( signature, levels = c( "RAS84", parent_sigs[ -6 ] ) ) )
+
+plotdat <- results$mvsurv_RSG_uppsala
+mv_surv_gg <- ggplot( plotdat,
+                      aes( x = HR, y = -log10( pvalue ), color = signature, label = predictor ) ) +
+    geom_point( size = 2 ) +
+    geom_point( data = subset( plotdat, signature == "RAS84" ),
+               aes( x = HR, y = -log10( pvalue ) ),
+               size = 3 ) +
+    geom_text_repel( data = subset( plotdat, signature == "RAS84" ),
+                    aes( x = HR, y = -log10( pvalue ), label = predictor ) ) +
+    geom_hline( yintercept = -log10( 0.05 ), color = my_orange, linetype = "dashed" ) +
+    plot_formatter( )
+
+print( mv_surv_gg )
+cairo_pdf( file = file.path( adat$plot.path, "mvcox_parent_sigs_volcano.pdf" ),
+          width = 5, height = 4 )
+print( mv_surv_gg )
+dev.off( )
+```
+```{r output_results}
+write.xlsx( results, file.path( adat$analysis.path, "coxph_RSG_results.xlsx" ) )
+```
+
+# Session Info
+
+```{r session_info}
+sessionInfo()
+```
