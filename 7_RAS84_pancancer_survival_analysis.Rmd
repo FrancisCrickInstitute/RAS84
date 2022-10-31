@@ -65,11 +65,6 @@ library( DT )
 library( broom )
 library( purrr )
 
-source( "/camp/stp/babs/working/eastp/code/R/R.packages.east01.functions.R")
-source( "scripts/lib.Ras_HighLow.335.R" )
-source( "scripts/lib.CCLE.335.R" )
-
-adat <- project.init( "pancancer_survival" )
 
 my_grey <- "#707173"
 my_red <- "#e3001a"
@@ -85,45 +80,21 @@ plot_formatter <- function() {
                panel.grid.minor = element_blank( ),
                panel.border = element_blank( ),
                panel.background = element_blank( ),
-               #axis.line = element_line(color = "black"),
-               #axis.line.x = element_line(color="black", size = 0.1 ),
-               #axis.line.y = element_line(color="black", size = 0.1 ),
                text = element_text( size = 10 ) )
 }
+
+## data resources
+TCGA_PANCANCER_SE_FILE <- file.path( "data", "objects", "pancancer_se.rds" )
+
+## figures
+KMPLOT_PANCANCER_TUMOUR_PLOT_FILE <- file.path( "figures", "kmplot_tumour.pdf" )
+KMPLOT_RI_PANCANCER_TUMOUR_PLOT_FILE <- file.path( "figures", "kmplot_RI_tumour.pdf" )
 ```
 
 # Load tumour SummarizedExperiment objects
 
 ```{r se_objects}
-SIG_HOME <- file.path( "data", "signatures" )
-krasSigNames <- sub( "\\.csv", "", dir( SIG_HOME ) )
-signatures <- lapply( krasSigNames, function( sigFile ) {
-    read.table( file = file.path( SIG_HOME, paste( sigFile, "csv", sep = "." ) ),
-               sep = "\t", stringsAsFactors = FALSE )[, 1 ]
-} ) %>% setNames( make.names( krasSigNames ) )
-RAS84_signature_map <- read.xlsx( file.path( "data", "RAS84_feature_map.xlsx" ) )
-signatures$RAS4 <- RAS84_signature_map$TCGA_gene_symbol
-
-## Read in pan-cancer mutation data
-alt_altDatFile <- file.path( "data", "oncogenicRASPath_TCGA", "oncogenic_pathway_alteration_level_TCGA.txt" )
-alt_altDat <- read.table( file = alt_altDatFile, header = TRUE, sep = "\t" )
-colnames( alt_altDat )[ 1 ] <- "pancan_pathway"
-
-rasPathwayDefFile <- file.path( "data", "rasPathwayDefinition.txt" )
-rasPathwayTab <- read.delim( file = rasPathwayDefFile, sep = "\t" )
-
-rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
-                    tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
-rasGeneSets <- lapply( rasGeneSets, as.character )
-ras_pathway_genes <- unlist( rasGeneSets )
-
-## identify RAS pathway alterations
-alt_genes <- sapply( strsplit( colnames( alt_altDat )[ -1 ], "\\." ), '[[', 2 )
-rasAlts_f <- alt_genes %in% ras_pathway_genes
-rasAlts <- colnames( alt_altDat )[ -1 ][ rasAlts_f ]
-
-tcga_crd_dat <- read.xlsx( file.path( "data", "TCGA-pancancer_CDR_Lui_et_al_supptab1.xlsx" ),
-                           sheet = "ExtraEndpoints" )
+se_pc <- readRDS( TCGA_PANCANCER_SE_FILE )
 ```
 
 # Survival data
@@ -205,71 +176,6 @@ cox_reg_l <- lapply( se_l_endpoint, function( se ) {
 } )
 ```
 
-## Coxph volcano plot
-
-```{r km_volcano}
-rasmut_ratio_l <- lapply( se_l_endpoint, function( se ) {
-    mat <- colData( se ) %>%
-        as.data.frame( ) %>%
-        dplyr::select( MUT.KRAS, MUT.NRAS, MUT.HRAS )
-    sum( rowSums( mat ) > 0 ) / ncol( se )
-} )
-rasmut_ratio <- melt( rasmut_ratio_l, value.name = "rasmut_ratio" ) %>%
-    rename( tumour = L1 )
-
-raspathmut_dat <- res %>%
-    filter( pval < 0.05 )
-
-rasmut_dat <- raspathmut_dat %>%
-    filter( mutation %in% c( "MUT.KRAS", "MUT.HRAS", "MUT.NRAS" ) ) 
-
-gg_vol <- ggplot( tert_res, aes( x = abs( coef ), y = -log10( pval ),
-                                label = tumour ) ) +
-    geom_point( ) +
-    geom_text_repel( size = 3 ) +
-    geom_hline( yintercept = -log10( 0.05 ), color = my_orange, linetype = "dotted" ) +
-    geom_vline( xintercept = 0, color = "black", linetype = "dotted" ) +
-    scale_color_manual( values = c( my_red,  my_grey, my_green ) ) +
-    plot_formatter( ) +
-    theme( axis.line = element_line( color = "black" ) ) +
-    labs( color = "RAS pathway driver", x = "abs OS coefficient", y = "-log10( p-value )" )
-
-cairo_pdf( file = file.path( adat$plot.path,
-                       paste0( "km_volcanoplot_regression_", surv_endpoint, ".pdf" ) ),
-    width = 3, height = 3 )
-gg_vol
-dev.off()
-```
-
-### KM plots
-
-KM plots across RAShigh and RASlow sample classifications.
-
-```{r km_rasact}
-km_file <- file.path( adat$plot.path, "km" )
-if( !file.exists( km_file ) )
-    dir.create( km_file )
-
-form <- as.formula( paste0( "Surv( ", endpoint_time, ",", surv_endpoint, " ) ~ PC" ) )
-for( i in names( se_l_endpoint ) ) {
-    se <- se_l_endpoint[[ i ]]
-    fit <- coxph( form, data = colData( se ) )
-    surv_l <- list( mid = survfit( fit, newdata = data.frame( PC = mean( se$PC ) ),
-                                  data = as.data.frame( colData( se ) ) ),
-                   upper = survfit( fit, newdata = data.frame( PC = mean( se$PC ) + 1 ),
-                                   data = as.data.frame( colData( se ) ) ),
-                   lower = survfit( fit, newdata = data.frame( PC = mean( se$PC ) - 1 ),
-                                   data = as.data.frame( colData( se ) ) ) )
-    gg <- ggsurvplot( surv_l,
-               combine = TRUE,
-               palette = c( my_grey, my_red, my_blue ) )
-    cairo_pdf( file = file.path( km_file, paste0( "km_", i, ".pdf" ) ),
-              width = 4, height = 4 )
-    print( gg )
-    dev.off( )
-}
-```
-
 ## RAS index regression results
 
 Here we only look at the coxph regression results for RAS index
@@ -293,13 +199,9 @@ for( i in decide_ri$tumour ) {
     gg <- ggsurvplot( surv_l,
                combine = TRUE,
                palette = c( my_grey, my_red, my_blue ) )
-    cairo_pdf( file = file.path( adat$analysis.path, paste0( "km_", i, "_ras_index.pdf" ) ),
+    cairo_pdf( file = sub( "tumour", i, KMPLOT_RI_PANCANCER_TUMOUR_PLOT_FILE ),
               width = 4, height = 4 )
     print( gg )
     dev.off( )
-    embed_fonts( file.path( adat$analysis.path, paste0( "km_", i, "_ras_index.pdf" ) ),
-                 outfile = file.path( adat$analysis.path, paste0( "km_", i, "_ras_index_embedded.pdf" ) ) )
 }
-
-decide_ri %>% filter( pval < 0.1 )
 ```

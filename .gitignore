@@ -1,2 +1,6 @@
 .~
-data/raw
+data/downloads/*
+data/objects/*
+renv/library/
+renv/settings.dcf
+R

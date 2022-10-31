@@ -19,7 +19,7 @@ body .main-container {
 ```
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(echo=TRUE, message=FALSE, warning=FALSE)
 options(scipen=15)
 ```
 
@@ -36,7 +36,7 @@ the CCLE legacy repository hosted at [The Broad](https://data.broadinstitute.org
 We selected lung derived cell line data. We labelled the cell lines as either KRAS mutation positive, RAS pathway mutation positive or RAS pathway mutation negative. Cell lines were labelled as RAS pathway mutation positive if they had a mutation in a RAS pathway gene member other than KRAS. RAS pathway membership was defined in [RAS pathway ref]. We removed cell lines with mutations in RAS pathway members other than KRAS from further analysis selecting 166 cell lines. We filtered the RAS signatures for genes relevant in the context of lung cancer. To do this we modelled the log COV of expression against the mean log2 expression across all genes using loess regression. Signature genes with positive residuals with respect to the fit and a higher log2 mean expression of 6 were selected. 
 We mapped each of the signatures to the cell line expression data and clustered the cell-lines using hierarchical clustering with a Ward.D2 agglomeration method. We split the resultant dendrograms into three clusters, labelling each high, medium and low for signature expression. The labels were assigned based on ranked mean cluster expression. To assess the performance of each of the signatures we calculated the significance of association of the high and low clusters with KRAS mutation using a chisq test. We also calculated the log2 fold change in the means between the high and the low group and the percentage of cell lines classified as high or low. To further refine each of the best performing signatures, we ran a differential analysis between the high and low clusters using limma. We selected signature genes with an fdr < 0.05 as those driving the clustering. We merged the differential genes for each signature tested to form our meta-signature RAS84.
 
-```{r r_init,message=FALSE,warning=FALSE}
+```{r r_init}
 library( affy )
 library( limma )
 library( reshape2 )
@@ -69,10 +69,6 @@ library( openxlsx )
 library( gridExtra )
 library( tidyverse )
 
-source( "/camp/stp/babs/working/eastp/code/R/R.packages.east01.functions.R")
-source( "../../../../scripts/lib.Ras_HighLow.335.R" )
-source( "../../../../scripts/lib.CCLE.335.R" )
-
 ## - colours
 my_grey <- "#707173"
 my_red <- "#993333"
@@ -94,8 +90,27 @@ plot_formatter <- function() {
               text = element_text( size = 12 ) )
 }
 
-tumour <- "LUNG"
-adat <- project.init( "results", root = "." )
+## Paths
+ESET_CCLE_AFFY_LUNG_FILE <- file.path( "data", "objects", "eset_ccle_affy_lung.rds" )
+RAS_SIG_HOME <- file.path( "data", "resources", "signatures", "ras" )
+RAS_PATHWAY_DEFINITION_FILE <- file.path( "data",
+                                         "downloads",
+                                         "oncogenic_RAS_pathway_defintions_Sanchez-Vega_etal.txt" )
+RAS84_FEATURE_MAP_FILE <- file.path( "data", "resources", "RAS84_feature_map.xlsx" )
+CONTROL_SIGNATURE_HOME <- file.path( "data", "resources", "signatures", "controls" )
+
+## figures
+ONCOGENIC_RAS_SAMPLE_COUNTS_PLOT_FILE <- file.path( "figures", "ccle_oncogenic_ras_sample_counts.pdf" )
+SIGNATURE_HEATMAP_FILE <- file.path( "figures", "SIG_CCLE_HEATMAP.pdf" )
+RAS84_HEATMAP_FILE <- file.path( "figures", "RAS84_CCLE_large_heatmap.pdf" )
+RAS_HIGHLOW_CONTINGENCY_FILE <- file.path( "figures", "ccle_ras_highlow_contingency.pdf" )
+KRAS_MUTATION_LOGLIK_FILE <- file.path( "figures", "ccle_KRAS_mutation_loglik.pdf" )
+RAS84_RAW_HEATMAP <- file.path( "figures", "RAS84_raw_heatmap.pdf" )
+SIGNATURE_CLUSTER_VOLCANOS_FILE <- file.path( "figures", "ccle_signature_cluster_volcanos.pdf" )
+RAS84_SIGNATURE_HEATMAP_FILE <- file.path( "figures", "ccle_RAS84_heatmap.pdf" )
+SIGNATURE_VOLCANO_YES_RAS84_FILE <- file.path( "figures", "ccle_RAS84_signature_volcano_yes.pdf" )
+KRAS_MUTATION_PVALUE_FILE <- file.path( "figures", "ccle_kras_mutation_pvalue.pdf" )
+CONTROL_SIGNATURES_VOLCANO_FILE <- file.path( "figures", "control_signatures_volcano.pdf" )
 ```
 
 # Data
@@ -104,11 +119,8 @@ adat <- project.init( "results", root = "." )
 
 Load CCLE ExpressionSet and filter for LUNG cell lines.
 
-```{r CCLE_init,message=FALSE,warning=FALSE}
-eSetFile <- file.path( "data", "CCLE_Affy_eSet.rds" )
-eset_ccle <- readRDS( file = eSetFile )
-
-eset_ccle_lung <- eset_ccle[ , pData( eset_ccle )$tumour == "LUNG" ]
+```{r CCLE_init}
+eset_ccle_lung <- readRDS( ESET_CCLE_AFFY_LUNG_FILE )
 names( pData( eset_ccle_lung )$mutations ) <- pData( eset_ccle_lung )$sample.id
 mut_ccle_lung <- pData( eset_ccle_lung )$mutations %>%
                                        as.data.frame( ) %>%
@@ -121,20 +133,18 @@ mut_ccle_lung <- pData( eset_ccle_lung )$mutations %>%
 
 Load RAS and control gene signatures from file. The heatmap shows the degree of overlap across the different RAS gene signatures. Many of the signatures contain unique genes highlighting the variation in RAS driven transcription given the biological context.
 
-```{r signatures,message=FALSE,warning=FALSE}
-SIG_HOME <- file.path( "data", "signatures" )
-krasSigNames <- sub( "\\.csv", "", dir( SIG_HOME ) )
-signatures_raw <- lapply( krasSigNames, function( sigFile ) {
-    read.table( file = file.path( SIG_HOME, paste( sigFile, "csv", sep = "." ) ),
+```{r signatures}
+rasSigNames <- sub( "\\.csv", "", dir( RAS_SIG_HOME ) )
+signatures_raw <- lapply( rasSigNames, function( sigFile ) {
+    read.table( file = file.path( RAS_SIG_HOME, paste( sigFile, "csv", sep = "." ) ),
                sep = "\t", stringsAsFactors = FALSE )[, 1 ]
 } )
-names( signatures_raw ) <- make.names( krasSigNames )
+names( signatures_raw ) <- make.names( rasSigNames )
 ```
 ```{r signature_overlap)
 ovdat <- unique( unlist( signatures_raw ) )
 
 ov <- do.call( 'cbind',lapply( signatures_raw, function( x ) as.numeric( ovdat %in% x ) ) )
-colnames( ov ) <- sig_name_map[ colnames( ov ) ]
 
 hm <- Heatmap( ov, col = c( "white", my_purple ),
               show_heatmap_legend = FALSE,
@@ -148,10 +158,8 @@ Read in TCGA's Oncogenic-RAS pathway definition. This is used to
 filter cells for oncogenic RAS signaling activity driven by pathway
 members other than RAS
 
-```{r ras_pathway,message=FALSE,warning=FALSE}
-rasPathwayDefFile <- file.path( "data", "oncogenic_RAS_pathway_defintions_Sanchez-Vega_etal.txt" )
-rasPathwayTab <- read.delim( file = rasPathwayDefFile, sep = "\t" )
-
+```{r ras_pathway}
+rasPathwayTab <- read.delim( file = RAS_PATHWAY_DEFINITION_FILE, sep = "\t" )
 rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
                      tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
 rasGeneSets <- lapply( rasGeneSets, as.character )
@@ -164,14 +172,14 @@ oncogenic-RAS(-) using the cell-line mutation data and pathway
 defintion defined above. Oncogenic-RAS(+) labelled cells are removed
 from further analysis. The barchart shows the cell line count per group.
 
-```{r RAS_annotate,message=FALSE,warning=FALSE}
+```{r RAS_annotate}
 ## - label CCLE samples as Oncogenic RAS negative, positive or KRAS+
 oncoras_ccle_lung <- mut_ccle_lung %>%
     tidyr::gather( name, value, -rowname ) %>%
     filter( name %in% unlist( rasGeneSets ) ) %>%
     group_by( rowname ) %>%
     dplyr::summarize( onco_ras = ifelse( all( value == "no" ), "oncoras_neg",
-                          ifelse( any( name == "KRAS" & value == "yes" ), "kras_mut", "oncoras_pos" ) ) )
+                                 ifelse( any( name == "KRAS" & value == "yes" ), "kras_mut", "oncoras_pos" ) ) )
 
 ## - add labels to CCLE expressionSet
 pData( eset_ccle_lung ) <- pData( eset_ccle_lung ) %>%
@@ -190,8 +198,9 @@ gg1 <- pData( eset_ccle_lung ) %>%
           legend.position = "none" ) +
     scale_fill_manual( values = c( my_purple, my_orange, my_grey ) )
 print( gg1 )
-if( !file.exists( pdf_file <- file.path( adat$plot.path, "oncogenic_ras_sample_counts.pdf" ) ) ) {
-    cairo_pdf( file = pdf_file, width = 1.3, height = 3 )
+
+if( !file.exists( ONCOGENIC_RAS_SAMPLE_COUNTS_PLOT_FILE ) ) {
+    cairo_pdf( file = ONCOGENIC_RAS_SAMPLE_COUNTS_PLOT_FILE, width = 1.3, height = 3 )
     print( gg1 )
     dev.off( )
 }
@@ -205,7 +214,7 @@ using loess regression. Signature genes with postive
 residuals with respect to the fit and a higher mean expression of 6 across
 all cells are selected. The scatter plots show COV against mean expression with the loess curve shown in black and the selected genes highlighted in green.
 
-```{r sig_assess,message=FALSE,warning=FALSE}
+```{r sig_assess}
 plotdat_sig_filt_l <- lapply( signatures_raw, function( sig ) {
   as.data.frame( exprs( eset_ccle_lung_kras ) ) %>%
     mutate( gsymbol = fData( eset_ccle_lung_kras )$Description ) %>%
@@ -227,8 +236,8 @@ signatures <- lapply( plotdat_sig_filt_l, function( df ) {
 } )
 
 plotdat <- bind_rows( plotdat_sig_filt_l, .id = "signature" )
-plotdat$signature <- factor( sig_name_map[ as.character( plotdat$signature ) ],
-                            levels = c( "HRAS", "KRASG13D134", "KrasLA", "RAS pathway", "MSigDB", "RAS addiction" ) )
+plotdat$signature <- factor( plotdat$signature,
+                            levels = c( "HRAS", "KRASG13D134", "KrasLA", "RAS_pathway", "MSigDB", "RAS_addiction" ) )
 
 gg <- ggplot( plotdat, aes( x = mean, y = cv, color = label ) ) +
   geom_point( alpha = 0.3 ) +
@@ -253,19 +262,14 @@ gg <- ggplot( plotdat, aes( x = mean, y = cv, color = label ) ) +
   theme( strip.background = element_blank( ),
          text = element_text( size = 10 ) )
 print( gg )
-if( !file.exists( pdf_file <- file.path( adat$plot.path, "sig_gene_selection.pdf" ) ) ) {
-    cairo_pdf( file = pdf_file, width = 3*1.5, height = 2*1.5 )
-    print( gg )
-    dev.off( )
-}
 ```
 
 Here we add the pre-computed RAS84 signature, derived below, to the
 signature list so we can present it in the contingency table
-figure. This is for the paper.
+figure.
 
 ```{r add_ras84}
-ras84_feature_map <- read.xlsx( file.path( "..",   "..", "..", "..", "data", "signatures", "ras", "RAS84_feature_map.xlsx" ) )
+ras84_feature_map <- read.xlsx( RAS84_FEATURE_MAP_FILE )
 signatures$RAS84 <- ras84_feature_map$CCLE_feature_id
 ```
 
@@ -275,7 +279,7 @@ Using the filtered signatures and cell-lines we clustered the cell-lines into th
 groups and label them as high, medium and low based on the average
 expression of the signature genes within each cluster. The clustering of the cell-lines for each signture are shown by the heatmaps below. KRAS mutation status is highlighted by the purple bars on the right hand side.
 
-```{r cluster,message=FALSE,warning=FALSE,results='asis',echo=FALSE}
+```{r cluster,results='asis',echo=FALSE}
 signatures_df <- melt( signatures ) %>%
   unite( gene_sig, value, L1, remove = FALSE )
 
@@ -329,7 +333,6 @@ for( sig_n in names( signatures ) ) {
         mutate( KRASmut = ifelse( onco_ras == "kras_mut", "+", "-" ) )
     hm_anno_row <- rowAnnotation( df = hm_anno_df[, "KRASmut", drop = FALSE ],
                                  col = list( KRASmut = c( "-" =  "white", "+" = my_purple ) ),
-                                 #annotation_width = 1,
                                  annotation_legend_param = list( title_gp = gpar( fontsize = 14 ),
                                                                 labels_gp = gpar( fontsize = 12 ) ),
                                  show_legend = FALSE,
@@ -350,14 +353,13 @@ for( sig_n in names( signatures ) ) {
                                                 labels_gp = gpar( fontsize = 4 ) ),
                     show_heatmap_legend = FALSE,
                     cluster_row_slices = FALSE )
-    #print( hm3d + hm_anno_row )
-    pdf_file <- file.path( adat$plot.path, "heatmaps", paste( sig_n, "heatmap.ward.pdf", sep = "_" ) )
+    pdf_file <- file.path( "figures", sub( "SIG", sig_n, SIGNATURE_HEATMAP_FILE ) )
     cairo_pdf( file = pdf_file, width = 2, height = 3 )
     print( hm3d + hm_anno_row )
     dev.off( )
     if( sig_n == "RAS84" ) {
-        if( !file.exists( pdf_file <- file.path( adat$plot.path, "heatmaps", paste( sig_n, "large_heatmap.ward.pdf", sep = "_" ) ) ) ) {
-            cairo_pdf( file = pdf_file, width = 3, height = 4 )
+        if( !file.exists( RAS84_HEATMAP_FILE ) ) {
+            cairo_pdf( file = RAS84_HEATMAP_FILE, width = 3, height = 4 )
             print( hm3d + hm_anno_row )
             dev.off( )
         }
@@ -383,7 +385,7 @@ not show a significant association of KRAS mutation with the highly
 transcribed cell-line group. Sign-Settleman is of particular interest
 here since it is a RAS addiction signature and therefore RAS related.
 
-```{r chisq,message=FALSE,warning=FALSE}
+```{r chisq}
 run_chisq <- function( df ) {
     tab <- df[ , c( "kras_mut", "oncoras_neg" ) ]
     res <- chisq.test( as.table( as.matrix( tab ) ) )
@@ -399,7 +401,6 @@ tab_dat <- samp_clust %>%
   spread( onco_ras, n, fill = 0 )
     
 chisq_res <- tab_dat %>%
-    #dplyr::select( -value ) %>%
     group_by( L1 ) %>%
     do( run_chisq( . ) )
 
@@ -492,8 +493,7 @@ print( gg_box )
 dev.off()
 
 ## - merge contingency heatmap and boxplots
-pdf_file <- file.path( adat$plot.path, "ras_highlow_contingency.pdf" )
-cairo_pdf( file = pdf_file, height = 3, width = 6.5 )
+cairo_pdf( file = RAS_HIGHLOW_CONTINGENCY_FILE, height = 3, width = 6.5 )
 ggs <- list( gg_hm = gg_hm, gg_box = gg_box )
 grobL <- lapply( ggs, ggplotGrob )
 widths <- lapply( grobL, function( gb ) gb$widths[ 2:5 ] )
@@ -521,7 +521,6 @@ Here we create a volcano plot highlighting each signature's ability to segregate
 ```{r ras_volcano}
 tab_dat <- samp_clust %>%
   left_join( pData( eset_ccle_lung_kras )[, c( "rowname", "onco_ras" ) ], by = "rowname" ) %>%
-    #filter( rasact != "RASmed" ) %>%
     dplyr::rename( signatures = L1 ) %>%
   mutate( signatures = factor( signatures ) ) %>%
   mutate( onco_ras_num = as.numeric( factor( onco_ras, levels = c( "oncoras_neg", "kras_mut" ) ) ) - 1 )
@@ -548,7 +547,7 @@ loglik_gg <- ggplot( plotdat, aes( x = 1, y = value, label = signatures ) ) +
     theme( legend.position = "none",
           text = element_text( size = 8 ) )
 
-cairo_pdf( file = file.path( adat$plot.path, "KRAS_mutation_loglik.pdf" ), width = 3, height = 3 )
+cairo_pdf( file = KRAS_MUTATION_LOGLIK_FILE, width = 3, height = 3 )
 print( loglik_gg )
 dev.off( )
 ```
@@ -561,10 +560,10 @@ signature genes, reran the clustering and then enriched for genes
 driving the clustering by selecting genes that are significantly
 differential between the high and low groups. The pooled signature clustering is shown in the first heatmap below. RAS activity dependent gene selection is highlighted in the volcano plots below and the clustering of the contructed RAS84 signature is shown in the second heatmap.
 
-```{r ras84,message=FALSE,warning=FALSE}
+```{r ras84}
 hmcols <- colorpanel( 1000, my_blue, "white", my_red )
 
-RAS84_parent_signatures <- c( "Loboda", "Bild.Nevins", "Downward_134" )
+RAS84_parent_signatures <- c( "RAS_pathway", "HRAS", "KRASG13D134" )
 RAS84_raw <- unique( unlist( signatures[ RAS84_parent_signatures ] ) )
 
 hmdat <- exprs( eset_ccle_lung_kras ) %>%
@@ -597,7 +596,6 @@ hm_anno_row <- rowAnnotation( df = hm_anno_df[, "KRASmut", drop = FALSE ],
                              show_legend = FALSE )
 
 col_anno_dat <- dplyr::select_( hmdat, .dots = RAS84_parent_signatures )
-colnames( col_anno_dat ) <- sig_name_map[ colnames( col_anno_dat ) ]
 col_anno_colours <- lapply( colnames( col_anno_dat ), function( x ) c( 'TRUE' = "lightgrey", 'FALSE' = "white" ) )
 names( col_anno_colours ) <- colnames( col_anno_dat )
 
@@ -629,8 +627,8 @@ hm3d <- Heatmap( t( hmmat ),
                 show_heatmap_legend = FALSE,
                 bottom_annotation = hm_anno_col )
 print( hm3d + hm_anno_row )
-if( !file.exists( pdf_file <- file.path( adat$plot.path, "heatmaps", "RAS84_raw_heatmap.ward.pdf" ) ) ) {
-    cairo_pdf( file = pdf_file, width = 2, height = 3 )
+if( !file.exists( RAS84_RAW_HEATMAP) ) ) {
+    cairo_pdf( file = RAS84_RAW_HEATMAP, width = 2, height = 3 )
     print( hm3d + hm_anno_row )
     dev.off( )
 }
@@ -676,10 +674,6 @@ RAS84_index_df <- exprs( eset_ccle_lung_kras ) %>%
 eset_ccle_lung_kras$RAS84_index <- pData( eset_ccle_lung_kras ) %>%
   left_join( RAS84_index_df, by = "sample.id" ) %>%
   pull( RAS84_index )
-
-write.table( signatures$RAS84, file = file.path( "data", "signatures", "ras", "curated", "RAS84.csv" ),
-            row.names = FALSE, col.names = FALSE, quote = FALSE )
-save( signatures, file = file.path( adat$analysis.path, "signatures_filtered.rda" ) )
 ```
 
 # Volcano plots for signature gene expression across clusters
@@ -706,8 +700,8 @@ gg <- ggplot( plotdat, aes( x = coef, y = log10pval, fill = decide ) ) +
     labs( x = "log2 fold change", y = "-log10 p-value" )
 print( gg )
 
-if( !file.exists( pdf_file <- file.path( adat$plot.path, "signature_cluster_volcanos.pdf" ) ) ) {
-    cairo_pdf( file = pdf_file, width = 3.5, height = 1.75)
+if( !file.exists( SIGNATURE_CLUSTER_VOLCANOS_FILE ) {
+    cairo_pdf( file = SIGNATURE_CLUSTER_VOLCANOS_FILE, width = 3.5, height = 1.75)
     print( gg )
     dev.off( )
 }
@@ -809,8 +803,8 @@ hm3d <- Heatmap( t( hmmat ),
                 row_names_max_width = unit( 10, "mm" ) )
 print( hm3d + hm_anno_row )
 
-if( !file.exists( pdf_file <- file.path( adat$plot.path, "heatmaps", "RAS84_heatmap.ward.pdf" ) ) ) {
-    cairo_pdf( file = pdf_file, width = 6, height = 4 )
+if( !file.exists( RAS84_SIGNATURE_HEATMAP_FILE ) ) {
+    cairo_pdf( file = RAS84_SIGNATURE_HEATMAP_FILE, width = 6, height = 4 )
     print( hm3d + hm_anno_row )
     dev.off( )
 }
@@ -824,7 +818,7 @@ and low groups is shown on the y-axis. The log2 fold change in average
 expression between the high and low groups is shown on the x-axis. The
 point size reflects the ratio of high+low classified samples.
 
-```{r volcano,message=FALSE,warning=FALSE}
+```{r volcano}
 color_map <- data.frame( sig_n = names( signatures ),
                          group = c( "selected", "selected",
                                    "discarded", "selected", "control", "discarded",
@@ -861,8 +855,8 @@ gg1d_all_sigs <- ggplot( plotdat_sig_volc, aes( x = l2fc, y = log10pval, label =
 gg1d_all_sigs <- gg1d_all_sigs + theme( legend.position = "right" )
 print( gg1d_all_sigs )
 
-if( !file.exists( pdf_file <- file.path( adat$plot.path, "signature_volcano_yes_RAS84.pdf" ) ) ) {
-    cairo_pdf( file = pdf_file, width = 5, height = 4 )
+if( !file.exists( SIGNATURE_VOLCANO_YES_RAS84_FILE ) ) {
+    cairo_pdf( file = SIGNATURE_VOLCANO_YES_RAS84_FILE, width = 5, height = 4 )
     gg1d_all_sigs
     dev.off( )
 }
@@ -878,7 +872,7 @@ new_pvalfig_gg <- ggplot( plotdat_sig_volc,
     theme( legend.position = "none",
            text = element_text( size = 8 ) ) 
 
-cairo_pdf( file = file.path( adat$plot.path, "KRAS_mutation_pvalue.pdf" ), width = 3, height = 3 )
+cairo_pdf( file = KRAS_MUTATION_PVALUE_FILE, width = 3, height = 3 )
 print( new_pvalfig_gg )
 dev.off( )
 ```
@@ -888,8 +882,7 @@ dev.off( )
 Here we take a look at how control signatures perform using our RAS activity validation strategy. Control signatures are onco-genic pathway signatures that are related to RAS signally but are not expected to drive exactly the same transcriptional response.
 
 ```{r controls}
-control_sig_home <- file.path( "data", "signatures", "controls" )
-control_sig_files <- dir( path = control_sig_home, pattern = "\\.txt" )
+control_sig_files <- dir( path = CONTROL_SIGNATURE_HOME, pattern = "\\.txt" )
 control_sigs <- sapply( control_sig_files, function( f ) {
   read.delim( file = file.path( control_sig_home, f ),
              stringsAsFactors = FALSE, header = FALSE )[, 1 ]
@@ -1002,8 +995,10 @@ gg1d_all_sigs <- ggplot( plotdat, aes( x = l2fc, y = log10pval,
 
 gg1d_all_sigs <- gg1d_all_sigs + theme( legend.position = "right" )
 print( gg1d_all_sigs )
-if( !file.exists( pdf_file <- file.path( adat$plot.path, "control_signature_volcano.pdf" ) ) ) {
-    cairo_pdf( file = pdf_file, width = 5, height = 4 )
+if( !file.exists( CONTROL_SIGNATURES_VOLCANO_FILE ) ) {
+    cairo_pdf( file = CONTROL_SIGNATURES_VOLCANO_FILE
+
+            , width = 5, height = 4 )
     gg1d_all_sigs
     dev.off( )
 }

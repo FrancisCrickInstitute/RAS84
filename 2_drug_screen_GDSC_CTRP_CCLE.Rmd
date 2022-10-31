@@ -47,10 +47,6 @@ library( UpSetR )
 
 options( max.print=300, width=100 )
 
-source( "/camp/stp/babs/working/eastp/code/R/R.packages.east01.functions.R")
-source( "../../scripts/lib.Ras_HighLow.335.R" )
-source( "../../scripts/lib.CCLE.335.R" )
-
 my_grey <- "#707173"
 my_red <- "#e3001a"
 my_orange <- "#f6ad6e"
@@ -71,7 +67,22 @@ plot_formatter <- function() {
                text = element_text( size = 10 ) )
 }
 
-adat <- project.init( "drug_screen", root = "results" )
+## Paths
+GDSC_SE_L_FILE <- file.path( "data", "gdsc_se_l.rds" )
+RAS_SIG_HOME <- file.path( "data", "resources", "signatures", "ras" )
+RAS84_FEATURE_MAP_FILE <- file.path( "data", "resources", "RAS84_feature_map.xlsx" )
+RAS_PATHWAY_DEFINITION_FILE <- file.path( "data",
+                                         "downloads",
+                                         "oncogenic_RAS_pathway_defintions_Sanchez-Vega_etal.txt" )
+ESET_CCLE_AFFY_LUNG_FILE <- file.path( "data", "objects", "eset_ccle_affy_lung.rds" )
+RAS84_HIGH_LOW_GDSC_CCLE_SIG_COMPOUNDS_FILE <- file.path( "data", "RAS84_HighvLow_CCLE_GDSC_sig_compounds.xlsx" )
+
+## figures
+GDSC_KRASMUT_VOLCANO_FILE <- file.path( "figures", "gdsc_ccle_krasmut_volcano.pdf" )
+GDSC_RASPATHWAY_VOLCANO_FILE <- file.path( "figures", "gdsc_ccle_raspathway_volcano.pdf" )
+GDSC_ENRICHMENT_PLOT_FILE <- file.path( "figures", "gdsc_ccle_enrichment_plot.pdf" )
+GDSC_RESISTANT_ENRICHMENT_PLOT_FILE <- file.path( "figures", "gdsc_ccle_resistant_enrichment_plot.pdf" )
+GDSC_VOLCANO_PLOT_FILE <- file.path( "figures", "gdsc_volcano.pdf" )
 ```
 
 # Introduction
@@ -160,35 +171,7 @@ GDSC dose-response analysis was carried out using
 [gdscIC50](https://github.com/CancerRxGene/gdscIC50) R package.
 
 ```{r gdsc_drug_data}
-gdsc_se_l <- readRDS( file.path( "data", "gdsc_se_l.rds" ) )
-```
-
-## The Cancer Therapeutics Response Portal (CTRP)
-
-* https://portals.broadinstitute.org/ctrp.v2.1/
-
-* CTRP v1 242 CCLs 185 compounds
-* CTRP v2 860 CCLs 481 compounds
-
-
-### CTRPv1
-
-CTRPv1 comes with AUC drug sensitivity values. We integrated cell line
-and drug information from additional data files. The version 1
-data is complied from assays of 354 drug compounds across 242 cell lines.
-
-```{r ctrpv1_drug_data}
-CTRPv1_se <- readRDS( file.path( "data", "CTRPv1_se.rds" ) )
-```
-
-### CTRPv2
-
-CTRPv2 comes with AUC and EC50 drug sensitivity values. We integrated cell line
-and drug information from additional data files. The version 2
-data is complied from assays of 545 compounds across 887 cell lines.
-
-```{r ctrpv2_drug_data}
-CTRPv2_se <- readRDS( file.path( "data", "CTRPv2_se.rds" ) )
+gdsc_se_l <- readRDS( GDSC_SE_L_FILE )
 ```
 
 ## Drug sensitivity dataset metrics
@@ -200,7 +183,7 @@ value distributions.
 ### Drug and cell line counts
 
 ```{r integrate_drug_resp}
-drug_se_l <- c( gdsc_se_l, list( CTRPv1 = CTRPv1_se, CTRPv2 = CTRPv2_se ) )
+drug_se_l <- gdsc_se_l
 bar_gg <- map( drug_se_l, dim ) %>%
     map( as.data.frame ) %>%
     map( rename, n = 1 ) %>%
@@ -246,15 +229,14 @@ for( i in names( drug_resp_gg_l ) ) {
 We read in RAS signature gene lists.
 
 ```{r ras84_sig}
-SIG_HOME <- file.path( "data", "signatures" )
-krasSigNames <- sub( "\\.csv", "", dir( SIG_HOME ) )
+krasSigNames <- sub( "\\.csv", "", dir( RAS_SIG_HOME ) )
 signatures <- lapply( krasSigNames, function( sigFile ) {
-    read.table( file = file.path( SIG_HOME, paste( sigFile, "csv", sep = "." ) ),
+    read.table( file = file.path( RAS_SIG_HOME, paste( sigFile, "csv", sep = "." ) ),
                sep = "\t", stringsAsFactors = FALSE )[, 1 ]
 } )
 names( signatures ) <- make.names( krasSigNames )
 
-ras84_map <- read.xlsx( file.path( "data", "RAS84_feature_map.xlsx" ) )
+ras84_map <- read.xlsx( RAS84_FEATURE_MAP_FILE )
 ```
 
 # The CCLE data
@@ -281,15 +263,13 @@ The data reports mutations at the transcript level so gene level
 annotation was obtained from Ensembl and the data collapsed to the gene level.
 
 ```{r setup_se}
-rasPathwayDefFile <- file.path( "..", "..", "data", "oncogenicRASPath_TCGA", "rasPathwayDefinition.txt" )
-rasPathwayTab <- read.delim( file = rasPathwayDefFile, sep = "\t" )
+rasPathwayTab <- read.delim( file = RAS_PATHWAY_DEFINITION_FILE, sep = "\t" )
 rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
                     tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
 rasGeneSets <- lapply( rasGeneSets, as.character )
 ras_pathway_genes <- unlist( rasGeneSets )
 
-rnaseq_se_file <- "rnaseq_se.rds"
-rnaseq_se <- readRDS( file.path( "data", "CCLE_rnaseq_se.rds" )
+rnaseq_se <- readRDS( ESET_CCLE_AFFY_LUNG_FILE )
 ```
 
 ```{r render_mutation_counts}
@@ -429,10 +409,6 @@ hm <- Heatmap( t( hmmat ),
               cluster_row_slices = FALSE,
               row_names_max_width = unit( 10, "mm" ) )
 draw( hm + hm_anno_row )
-
-png( file = file.path( adat$plot.path, "hm.png" ) )
-print( draw( hm + hm_anno_row ) )
-dev.off( )
 ```
 
 # RNA-Seq drug response intregration {.tabset .tabset-fade}
@@ -718,7 +694,7 @@ vol_gdsc_krasmut_gg <- ggplot( gdsc_res_krasmut_df, aes( x = estimate, y = -log1
 
 print( vol_gdsc_krasmut_gg )
 
-cairo_pdf( file = file.path( adat$plot.path, "vol_gdsc_krasmut_wrap.pdf" ),
+cairo_pdf( file = GDSC_KRASMUT_VOLCANO_FILE,
            width = 4, height = 4)
 print( vol_gdsc_krasmut_gg )
 dev.off( )
@@ -850,8 +826,7 @@ vol_gg <- ggplot( plotdat, aes( x = estimate, y = -log10( p.value ) ) ) +
 
 print( vol_gg )
 
-cairo_pdf( file = file.path( adat$plot.path, "vol_gdsc_ras_pathway_wrap.pdf" ),
-           width = 4, height = 4)
+cairo_pdf( file = GDSC_RASPATHWAY_VOLCANO_FILE, width = 4, height = 4)
 print( vol_gg )
 dev.off( )
 ```
@@ -895,14 +870,6 @@ drugs_res_l <- map2( drugs_res_l, names( drugs_res_l ), function( df, data_n ) {
 drugs_decide_l <- map( drugs_res_l, filter, padj < 0.05 ) %>%
     map( filter, abs( estimate ) > 1 ) %>%
     map( function( df ) split( df, df$sensitivity_label ) )
-```
-```{r drug_screen_GDSC1_test,eval=FALSE}
-test_drug_name <- "Dihydrorotenone"
-test_drug_dat <- drug_ras84_df_l$GDSC2 %>%
-    filter( DRUG_NAME == test_drug_name )
-
-test_lm <- lm( value ~ KRASmut + RSG_2, data = test_drug_dat )
-summary( test_lm )
 ```
 
 ### Enriched drug targets
@@ -985,8 +952,7 @@ enrich_gg <- ggplot( enrich_df, aes( x = -log10( p.value ), y = order,
         labels = as.character( enrich_df$pathway ) ) +
     plot_formatter( ) 
 
-cairo_pdf( file = file.path( adat$plot.path, "gdsc_enrichment_plot.pdf" ),
-          width = 7, height = 3 )
+cairo_pdf( file = GDSC_ENRICHMENT_PLOT_FILE, width = 7, height = 3 )
 print( enrich_gg   )
 dev.off( )
 
@@ -1000,8 +966,8 @@ enrich_rest_gg <- plotdat %>%
     scale_colour_manual( values = c( my_grey, my_red ) ) +
     xlim( c( 0, 5 ) )  +
     plot_formatter( )
-cairo_pdf( file = file.path( adat$plot.path, "gdsc_rest_enrichment_plot.pdf" ),
-          width = 7, height = 2.5 )
+
+cairo_pdf( file = GDSC_RESISTANT_ENRICHMENT_PLOT_FILE, width = 7, height = 2.5 )
 print( enrich_rest_gg  )
 dev.off( )
 ```
@@ -1072,7 +1038,7 @@ vol_gg <- ggplot( plotdat, aes( x = estimate, y = -log10( p.value ) ) ) +
     labs( title = "RAS84 activity" )
 print( vol_gg )
 
-cairo_pdf( file = file.path( adat$plot.path, "vol_gdsc_wrap.pdf" ) )
+cairo_pdf( file = GDSC_VOLCANO_PLOT_FILE )
 print( vol_gg )
 dev.off( )
 ```
@@ -1085,181 +1051,8 @@ dbase <- map( drugs_decide_l[ 1:2 ], bind_rows ) %>%
     unite( "key", dataset, sensitivity_label, TARGET_CATEGORY, remove = FALSE ) %>%
     mutate( enriched = key %in% drug_pathway$key ) %>%
     dplyr::select( -key )
-write.xlsx( dbase, file.path( adat$analysis.path, "RAS84_HighvLow_CCLE_GDSC_sig_compounds.xlsx" ) )
+write.xlsx( dbase, RAS84_HIGH_LOW_GDSC_CCLE_SIG_COMPOUNDS_FILE )
 ```
-
-### CTRP volcano plots
-
-```{r ctrp_volc,fig.width=12,fig.height=10}
-drug_pathway_ctrp <- map( drugs_phyper_res[ 3:4 ], bind_rows, .id = "sensitivity_label" ) %>%
-    bind_rows( .id = "dataset" ) %>%
-    droplevels( ) %>%
-    unite( "key", dataset, sensitivity_label, pathway, remove = FALSE )
-drug_pathway_ctrp_l <- split( drug_pathway_ctrp, drug_pathway_ctrp$pathway )
-
-res_ctrp_df <- drugs_res_l[ 3:4 ] %>%
-    bind_rows( .id = "dataset" ) %>%
-    mutate( signif = padj < 0.05 & abs( estimate ) > 1 ) %>%
-    unite( "key", dataset, sensitivity_label, TARGET_CATEGORY, remove = FALSE )
-
-plotdat_ctrp <- map( drug_pathway_ctrp_l, function( df ) {
-    res_ctrp_df %>%
-        mutate( highlight = key %in% df$key & signif ) %>%
-        mutate( facet = df$pathway[ 1 ] )
-} ) %>%
-    bind_rows( .id = "target_category" )
-
-#    mutate( facet = factor( facet, levels = c( "ERK MAPK signaling", "DNA replication",
-#                                               "EGFR signaling", "Mitosis",
-#                                              "Protein stability and degradation",
-#                                              "Chromatin histone acetylation") ) )
-
-vol_ctrp_gg <- ggplot( plotdat_ctrp, aes( x = estimate, y = -log10( p.value ) ) ) +
-    geom_point( color = "#EEEEEE", alpha = 0.5 ) +
-    geom_point( data = filter( plotdat_ctrp, signif ), color = "grey", alpha = 0.5 ) +
-    geom_point( data = filter( plotdat_ctrp, highlight ),
-               aes( color = TARGET_CATEGORY ), size = 3 ) +
-    geom_vline( xintercept = 0 ) +
-    geom_vline( xintercept = c( -1, 1 ), linetype = "dashed" ) +
-    geom_text_repel( data = filter( plotdat_ctrp, highlight & sensitivity_label == "resistant" ),
-                    aes( x = estimate, y = -log10( p.value ), colour = TARGET_CATEGORY, label = DRUG_NAME ),
-                    inherit.aes = FALSE,
-                    xlim = c( 3, NA ),
-                    nudge_x      = 0.15,
-                    direction    = "y",
-                    hjust        = -.5,
-                    segment.size = 0.2,
-                    point.padding = 1,
-                    size = 2 ) +
-    geom_text_repel( data = filter( plotdat_ctrp, highlight & sensitivity_label == "sensitive" ),
-                    aes( x = estimate, y = -log10( p.value ), colour = TARGET_CATEGORY, label = DRUG_NAME ),
-                    inherit.aes = FALSE,
-                    xlim = c( NA, -2 ),
-                    nudge_x      = 0.15,
-                    direction    = "y",
-                    hjust        = .5,
-                    segment.size = 0.2,
-                    point.padding = 1,
-                    size = 2 ) +
-    xlim( c( -4, 4 ) ) +
-    facet_wrap( ~facet, nrow = 4 ) +
-    plot_formatter( ) +
-    theme( legend.position = "none",
-           panel.grid.major = element_blank( ),
-           panel.grid.minor = element_blank( ),
-          strip.background = element_blank( ) ) +
-    labs( x = "effect size (delta AUC)",
-          title = "RAS84 activity" )
-print( vol_ctrp_gg )
-cairo_pdf( file = file.path( adat$plot.path, "vol_ctrp_wrap.pdf" ),
-          width = 10, height = 10 )
-print( vol_ctrp_gg )
-dev.off( )
-```
-```{r ctrp_output}
-dbase <- map( drugs_decide_l[ 3:4 ], bind_rows ) %>%
-    map( dplyr::select,
-        DRUG_NAME, estimate, p.value, padj, sensitivity_label, TARGET_CATEGORY ) %>%
-    bind_rows( .id = "dataset" ) %>%
-    unite( "key", dataset, sensitivity_label, TARGET_CATEGORY, remove = FALSE ) %>%
-    mutate( enriched = key %in% drug_pathway$key ) %>%
-    dplyr::select( -key )
-write.xlsx( dbase, file.path( adat$analysis.path, "RAS84_HighvLow_CCLE_CTRP_sig_compounds.xlsx" ) )
-```
-
-# The parent signatures
-
-## Clustering
-
-```{r other_sigs_clustering}
-sigs_class_l <- map2( signatures, names( signatures ), function( sig, sig_name ) {
-    sig_f <- rowData( rnaseq_se )$external_gene_name %in% sig
-    lung_sig_se <- rnaseq_se[ sig_f, rnaseq_se$cancer_type == "LUNG" ]
-    cluster_no <- 2
-    vst_mat <- assays( lung_sig_se )$vst
-    hc <- hclust( dist( t( vst_mat ) ), method = "ward.D2" )
-    hcd <- as.dendrogram( hc )
-    ct <- cutree( hc, k = cluster_no )
-    ct_df <- ct %>%
-        as.data.frame( ) %>%
-        dplyr::rename( ct_cluster = 1 ) %>%
-        rownames_to_column( var = "Tumor_Sample_Barcode" )
-    ct_means <- vst_mat %>%
-        as.data.frame( ) %>%
-        tidyr::gather( Tumor_Sample_Barcode, value ) %>%
-        left_join( ct_df, by = "Tumor_Sample_Barcode" ) %>%
-        group_by( ct_cluster ) %>%
-        dplyr::summarize( mean = mean( value ) ) %>%
-        arrange( mean ) %>%
-        mutate( sig_group = paste( "SG", 0:( cluster_no - 1 ), sep = "_" ) )
-    sig_class <- ct_df %>%
-        left_join( ct_means, by = "ct_cluster" ) %>%
-        mutate( sig_group = factor( sig_group ) ) %>%
-        dplyr::select( Tumor_Sample_Barcode, sig_group ) %>%
-        rename( !!sig_name := sig_group )
-} )
-```
-
-## Drug screen
-
-```{r other_sigs_drugscreen}
-sig_class_decide_l <- map2( sigs_class_l, names( sigs_class_l ), function( sig_class, sig_n ) {
-    drug_ras84_df_l <- map( drug_ras84_df_l, left_join, sig_class,
-                           by = "Tumor_Sample_Barcode",
-                           suffix = c( "", "" ) )
-    form <- as.formula( paste( "value ~ KRASmut +", sig_n ) )
-    drugs_fit_l <- map2( drug_ras84_df_l[1:2], names( drug_ras84_df_l[1:2] ), function( df, n ) {
-        filter( df, DRUG_NAME %in% drugs_filtered_l[[ n ]]$DRUG_NAME )
-    } ) %>%
-    map( nest, data = -DRUG_NAME ) %>% 
-    map( mutate,
-        fit = map( data, ~ lm( form, data = .x ) ),
-        tidied = map( fit, tidy )
-        ) %>% 
-    map( unnest, tidied )
-    drugs_res_l <- map( drugs_fit_l, filter, term == paste0( sig_n, "SG_1" ) ) %>%
-        map( mutate, padj = p.adjust( p.value, method = "fdr" ) ) %>%
-        map( arrange, padj ) %>%
-        map( mutate, sensitivity_label = ifelse( estimate > 0, "resistant", "sensitive" ) )
-    drugs_res_l <- map2( drugs_res_l, names( drugs_res_l ), function( df, data_n ) {
-        left_join( df, drugs_filtered_l[[ data_n ]], by = "DRUG_NAME", suffix = c( "", "" ) ) %>%
-            left_join( as.data.frame( rowData( drug_se_l[[ data_n ]] )[, c( "DRUG_NAME", "TARGET_CATEGORY" ) ] ),
-                      by = "DRUG_NAME", suffix = c( "", "" ) )
-    } )
-    drugs_decide_l <- map( drugs_res_l, filter, padj < 0.05 ) %>%
-        map( filter, abs( estimate ) > 1 ) %>%
-        map( function( df ) split( df, df$sensitivity_label ) )
-    drugs_decide_l
-} )
-
-drugs_phyper_res_sig_l <- map( sig_class_decide_l, function( drugs_decide_l ) {
-    drugs_phyper_res <- map2( drugs_decide_l, names( drugs_decide_l ), function( l, data_n ) {
-        map( l, function( df ) {
-            hit_pathways <- table( df$TARGET_CATEGORY )
-            map( names( hit_pathways ), function( pathway_name ) {
-                q <- hit_pathways[ pathway_name ] ## white balls extracted
-                m <- sum( drugs_res_l[[ data_n ]]$TARGET_CATEGORY == pathway_name ) ## white ball total
-                n <- nrow( drugs_res_l[[ data_n ]] ) - m ## black ball total
-                p <- nrow( df ) ## balls extracted
-                pval <- phyper( q, m, n, p, lower.tail = FALSE )
-                data.frame( fg_pathway_n_selected = q,
-                           fg_pathway_n = m,
-                           bg_n = n,
-                           sig_list_n = p,
-                           p.value = pval,
-                           pathway = pathway_name )
-            } ) %>%
-                bind_rows( ) %>%
-                mutate( padj = p.adjust( p.value, method = "fdr" ) ) %>%
-                arrange( padj ) %>%
-                filter( padj < 0.05 ) %>%
-                filter( fg_pathway_n_selected > 1 ) %>%
-                    filter( pathway != "Unclassified" )
-        } )
-    } )
-} )
-```
-
 
 # Session Info
 

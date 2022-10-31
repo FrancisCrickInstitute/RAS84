@@ -1,5 +1,5 @@
 ---
-title: "TCGA LUAD RAG mutation association analysis : Project 002"
+title: "RAS84 signature sample classification of TCGA LUAD cohort : Project 002"
 author: "philip.east@crick.ac.uk"
 date: "12/02/2019"
 output: 
@@ -37,6 +37,50 @@ library( openxlsx )
 library( broom )
 library( DT )
 library( ggrepel )
+
+my_grey <- "#707173"
+my_red <- "#993333"
+my_orange <- "#f6ad6e"
+my_green <- "#7ab51d"
+my_lightgreen <- "#adcf82"
+my_purple <- "#bb90bd"
+my_blue <- "#4066aa"
+my_lightblue <- "#336699"
+
+plot_formatter <- function() {
+    theme_bw( ) +
+        theme( panel.grid.major = element_blank( ),
+               panel.grid.minor = element_blank( ),
+               panel.border = element_blank( ),
+              panel.background = element_blank( ),
+              axis.line = element_line(color = "black"),
+              axis.line.x = element_line(color="black", size = 0.5 ),
+              axis.line.y = element_line(color="black", size = 0.5 ),
+              text = element_text( size = 12 ) )
+}
+
+tumour <- "LUAD"
+sig_n <- "RAS84"
+
+## data resources
+TCGA_LUAD_RAS84_CLASS_SE_FILE <- file.path( "data", "objects", "TCGA_LUAD_RAS84_class_se_t.rds" )
+RAS_SIG_HOME <- file.path( "data", "resources", "signatures", "ras" )
+RAS84_FEATURE_MAP_FILE <- file.path( "data", "resources", "RAS84_feature_map.xlsx" )
+RAS_PATHWAY_DEFINITION_FILE <- file.path( "data",
+                                         "downloads",
+                                         "oncogenic_RAS_pathway_defintions_Sanchez-Vega_etal.txt" )
+ONCOGENIC_PATHWAY_ALTERATIONS_FILE <- file.path( "data",
+                                                "downloads",
+                                                "oncogenic_pathway_alteration_level_TCGA.txt" )
+RAG_VARIANTS_FILE <- file.path( "results", "rag_variants.xlsx" )
+SIGNATURE_CLUSTER_MUTATIONS_FILE <- file.path( "results", "signature_cluster_mutations.xlsx" )                                                
+## figures
+RAG_VARIANT_MOSAIC_PLOTS_FILE <- file.path( "figures", "mosaic_variant.pdf" )
+RAS84_RAG_KRASMUT_BARPLOT_FILE <- file.path( "figures", "RAS84_RAG_KRASmut_barplots.pdf" )
+KRASMUT_LOGLIK_FILE <- file.path( "figures", "SIG_RAG_KRASmut_mutation_loglik.pdf" )
+RAS84_RAG_HEATMAP_FILE <- file.path( "figures", "RAS84_RAG_heatmap.pdf" )
+RAS84_RAG_VARIANT_BARPLOT_FILE <- file.path( "figures", "RAS84_RAG_VARIANT_barplot.pdf" )
+RAS84_RAG_KRASMUT_TYPE_BARPLOT_FILE <- file.path( "figures", "RAS84_RAG_KRASmut_type_barlot.pdf" )
 ```
 
 # Load data
@@ -47,28 +91,22 @@ signatures from the TCGA LUAD validate signatures analysis. Load TCGA somatic
 mutation details.
 
 ```{r data_in}
-se_t_file <- file.path( "data", "se_t.rds" )
-se_t <- readRDS( se_t_file )
+se_t <- readRDS( TCGA_LUAD_RAS84_CLASS_SE_FILE )
+krasSigNames <- sub( "\\.csv", "", dir( RAS_SIG_HOME ) )
+signatures <- lapply( krasSigNames, function( sigFile ) {
+    read.table( file = file.path( RAS_SIG_HOME, paste( sigFile, "csv", sep = "." ) ),
+               sep = "\t", stringsAsFactors = FALSE )[, 1 ]
+} )
+names( signatures ) <- make.names( krasSigNames )
+ras84_map <- read.xlsx( RAS84_FEATURE_MAP_FILE )
+signatures$RAS84 <- ras84_map$TCGA_gene_symbol
 
-SIG_HOME <- "signatures"
-init.signatures <- function( ) {
-    krasSigNames <- sub( "\\.csv", "", dir( SIG_HOME ) )
-    signatures <- lapply( krasSigNames, function( sigFile ) {
-        read.table( file = file.path( SIG_HOME, paste( sigFile, "csv", sep = "." ) ),
-                             sep = "\t", stringsAsFactors = FALSE )[, 1 ]
-    } ) %>% setNames( make.names( krasSigNames ) )
-    signatures
-}
-RAS84_signature_map <- read.xlsx( file.path( SIG_HOME, "RAS84_feature_map.xlsx" ) )
-rasPathwayDefFile <- file.path( "data", "rasPathwayDefinition.txt" )
-rasPathwayTab <- read.delim( file = rasPathwayDefFile, sep = "\t" )
-
+rasPathwayTab <- read.delim( file = RAS_PATHWAY_DEFINITION_FILE, sep = "\t" )
 rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
                     tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
 rasGeneSets <- lapply( rasGeneSets, as.character )
 
-alt_altDatFile <- file.path(  "data", "oncogenic_pathway_alteration_level_TCGA.txt" )
-alt_altDat <- read.table( file = alt_altDatFile, header = TRUE, sep = "\t" )
+alt_altDat <- read.table( file = ONCOGENIC_PATHWAY_ALTERATIONS_FILE, header = TRUE, sep = "\t" )
 colnames( alt_altDat )[ 1 ] <- "pancan_pathway"
 
 ## identify RAS pathway alterations
@@ -104,11 +142,6 @@ ras_alt_gg <- ggplot( plotdat, aes( x = alteration, y = ras_index, color = prese
     geom_boxplot( position = dodge, width = 0.1 ) +
     theme( axis.text.x = element_text( angle = 90, hjust = 1 ) )
 print( ras_alt_gg )
-
-png( file = file.path( adat$plot.path, "violinplot.png" ),
-    width = 1200 )
-print( ras_alt_gg )
-dev.off()
 ```
 ```{r ras_pathway_alt_lm}
 lmfit <- plotdat %>%
@@ -173,9 +206,7 @@ dbase <- mutation_tab %>%
     arrange( fdr ) %>%
     as.data.frame( )
 
-write.xlsx( dbase, file = file.path( adat$analysis.path,
-                                    "variant_calls_rasactivity_groups.xlsx" ) )
-
+write.xlsx( dbase, file = RAG_VARIANTS_FILE )
 DT::datatable( dbase )
 ```
 
@@ -200,7 +231,7 @@ for( i in mutations_decide$variants ) {
         dplyr::select( RAS84, value ) %>%
         table( )
     colnames( tab ) <- c( "wildtype", "mutant" )
-    cairo_pdf( file = file.path( adat$plot.path, paste0( "mosaic_", i, ".pdf" ) ) )
+    cairo_pdf( file = file.path( adat$plot.path, sub( "variant", i, RAG_VARIANT_MOSAIC_PLOTS_FILE ) ) )
     print( mosaic( tab, shade = TRUE, legend = TRUE, main = i,
                   gp = shading_hsv,
                   gp_args = list( h = c(28/360, 203/360 ), s = c( 1, 0 ), v = c( 1, 0.5 ),
@@ -212,9 +243,7 @@ for( i in mutations_decide$variants ) {
 # Enriched mutants in other signatures
 
 ```{r other_sigs,eval=FALSE}
-test_sigs <- c( "Bild.Nevins", "Downward_134", "KRAS_msigdb_HM", "Loboda", "SweetCordero", "RAS84", "RAS34" )
-
-mutation_dat_l <- map( test_sigs, function( sig_n ) { 
+mutation_dat_l <- map( names( signatures ), function( sig_n ) { 
     mutation_dat <- colData( se_t ) %>%
         as.data.frame( ) %>%
         dplyr::select(
@@ -228,8 +257,8 @@ mutation_dat_l <- map( test_sigs, function( sig_n ) {
         select( -barcode ) %>%
         rename( RGS = sig_n ) %>%
         filter( variants %in% mutations_decide$variants )
-} )
-names( mutation_dat_l ) <- test_sigs
+} ) %>%
+    setNames( names( signatures ) )
 
 chisq_res_l <- map( names( mutation_dat_l ), function( sig_n ) { 
     mutation_dat <-  mutation_dat_l[[ sig_n ]]
@@ -265,13 +294,11 @@ gg <- bind_rows( chisq_res_l ) %>%
     ggplot( aes( x = variant, y = -log10( pval ), color = signatures, group = signatures ) ) +
     geom_point( ) +
     geom_line()
-png( file = file.path( adat$plot.path, "other_sigs.png" ), width = 700 )
 print( gg )
-dev.off()
 
 dbase_allsigs <- chisq_res_l %>%
     bind_rows( ) %>%
-    write.xlsx( file.path( adat$analysis.path, "sig_mutations_all_signatures.xlsx" ) )
+    write.xlsx( SIGNATURE_CLUSTER_MUTATIONS_FILE )
 ```
 ```{r other_sigs_bar}
 gg_bar_df <- mutation_dat_l %>%
@@ -287,9 +314,7 @@ gg_bar <- ggplot( gg_bar_df, aes( x = RGS, y = mut_pc ) ) +
     facet_grid( signature ~ 1 ) +
     theme( strip.text.y = element_text( angle = 0 ),
            axis.text.x = element_text( angle = 90, hjust = 0.95 ) )
-png( file = file.path( adat$plot.path, "KRAS_per_RAG_allsigs.png" ), width = 250, height = 600 )
 print( gg_bar )
-dev.off( )
 ```
 
 ```{r other_sigs_heatmap}
@@ -330,11 +355,7 @@ hm_l <- map( names( hmdat_l ), function( hmdat_n ) {
 hm <- hm_l[[ 1 ]]
 for( i in 2:length( hm_l ) )
     hm <- hm + hm_l[[ i ]]
-
-png( file = file.path( adat$plot.path, "mutation_heatmap_allsigs_width.png" ),
-    width = 900, height = 300 )
 print( hm )
-dev.off( )
 ```
 
 # KRAS mutation
@@ -362,8 +383,7 @@ gg <- gg + theme( axis.text.x = element_text( angle = 90, hjust = 0.95 ) ) +
     theme( text = element_text( size = 14 ) )
 gg
 
-pdf( file = file.path( adat$plot.path, paste0( sig_n, "_rasact_KRASmut_barplots.pdf" ) ),
-    height = 5, width = 2 )
+pdf( file = RAS84_RAG_KRASMUT_BARPLOT_FILE, height = 5, width = 2 )
 print( gg )
 dev.off( )
 ```
@@ -397,7 +417,7 @@ loglik_gg <- ggplot( plotdat, aes( x = 1, y = value, label = signatures ) ) +
     theme( legend.position = "none",
           text = element_text( size = 8 ) )
 
-cairo_pdf( file = file.path( adat$plot.path, "KRAS_mutation_loglik.pdf" ), width = 3, height = 3 )
+cairo_pdf( file = sub( "RAS84", i, KRASMUT_LOGLIK_FILE ), width = 3, height = 3 )
 print( loglik_gg )
 dev.off( )
 print( loglik_gg )
@@ -430,7 +450,7 @@ names( loglik_other_gg_l ) <- names( mutations_decide_all )
 ```
 ```{r render_other_loglik}
 for( i in names( loglik_other_gg_l ) ) {
-    cairo_pdf( file = file.path( adat$plot.path, paste0( i, "_mutation_loglik.pdf" ) ), width = 3, height = 3 )
+    cairo_pdf( file = sub( "SIG", i, KRASMUT_LOGLIK_FILE ), width = 3, height = 3 )
     print( loglik_other_gg_l[[ i ]] )
     dev.off( )
 }
@@ -481,7 +501,6 @@ Here we setup the significant mutations as row annotations for the heatmap.
 
 ```{r mut_anno}
 mutations <- mutations_decide %>%
-    ##filter( variants != "DEL.CDKN2B" ) %>%
     pull( variants )
 mutations <- mutations[ c( 6, 4, 8, 5, 7, 9, 1, 2, 3 ) ]
 
@@ -520,7 +539,7 @@ Here we setup parent signature gene membership as column annotation
 for the heatmap.
 
 ```{r gene_anno}
-RAS84_parent_signatures <- c( "Bild.Nevins", "Downward_146", "Loboda" )
+RAS84_parent_signatures <- c( "HRAS", "KRASG13D134", "RAS_pathway" )
 
 parents <- melt( signatures[ RAS84_parent_signatures ], value.name = "gene_id" ) %>%
     filter( gene_symbol %in% signatures$RAS84 ) %>%
@@ -592,8 +611,7 @@ hm_ras_index <- Heatmap( hmmat_ras_index,
 
 print( hm + hm_ras_index + hm_anno_row )
 
-pdf( file = file.path( adat$plot.path, "RAS84_clusters_5_heatmap.pdf" ) ,
-    width = 8, height = 4 )
+pdf( file = RAS84_RAG_HEATMAP_FILE, width = 8, height = 4 )
 hm + hm_ras_index + hm_anno_row
 dev.off( )
 ```
@@ -626,8 +644,7 @@ for( i in names( sig_mut_gg_l ) ) {
 ```
 ```{r sig_mut_barchart_file}
 for( i in names( sig_mut_gg_l ) ) {
-    pdf( file = file.path( adat$plot.path, paste0( sig_n, "_rasact_", i, "_KRASmut_sig_barplots.pdf" ) ),
-        height = 4, width = 1.5 )
+    pdf( file = sub( "VARIANT", i, RAS84_RAG_VARIANT_BARPLOT_FILE ), height = 4, width = 1.5 )
     print( gg )
     dev.off( )
 }
@@ -701,8 +718,7 @@ gg <- gg + theme( axis.text.x = element_text( angle = 90, hjust = 0.95 ) ) +
     theme( legend.position = "right" )
 print( gg )
 
-pdf( file = file.path( adat$plot.path, paste0( sig_n, "_rasact_KRASmut_type.pdf" ) ),
-    height = 5, width = 3 )
+pdf( file = RAS84_RAG_KRASMUT_TYPE_BARPLOT_FILE, height = 5, width = 3 )
 print( gg )
 dev.off( )
 ```

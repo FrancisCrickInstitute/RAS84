@@ -1,5 +1,5 @@
 ---
-title: "RAS signature Survival Analysis Validation : Project 002"
+title: "RAS84 Survival Analysis"
 author: "philip.east@crick.ac.uk"
 date: "12/02/2019"
 output: 
@@ -45,10 +45,6 @@ library( vcd )
 library( coxphMIC )
 library( patchwork )
 
-source( "/camp/stp/babs/working/eastp/code/R/R.packages.east01.functions.R")
-source( "../../scripts/lib.Ras_HighLow.335.R" )
-source( "../../scripts/lib.CCLE.335.R" )
-
 my_grey <- "#707173"
 my_red <- "#e3001a"
 my_orange <- "#f6ad6e"
@@ -57,7 +53,6 @@ my_lightgreen <- "#adcf82"
 my_purple <- "#bb90bd"
 my_blue <- "#4066aa"
 
-adat <- project.init( file.path( "survival" ) )
 
 plot_formatter <- function() {
     theme_bw( ) +
@@ -70,6 +65,31 @@ plot_formatter <- function() {
                axis.line.y = element_line(color="black", size = 0.1 ),
                text = element_text( size = 10 ) )
 }
+
+## data resurces
+TCGA_LUAD_RAS84_CLASS_SE_FILE <- file.path( "data", "objects", "TCGA_LUAD_RAS84_class_se_t.rds" )
+RAS_SIG_HOME <- file.path( "data", "resources", "signatures", "ras" )
+RAS84_FEATURE_MAP_FILE <- file.path( "data", "resources", "RAS84_feature_map.xlsx" )
+RAS_PATHWAY_DEFINITION_FILE <- file.path( "data",
+                                         "downloads",
+                                         "oncogenic_RAS_pathway_defintions_Sanchez-Vega_etal.txt" )
+UPPSALA_SE_FILE <- file.path( "data", "objects", "UPPSALA_se.rds" )
+
+## figures
+KMPLOT_MISCLASS_STAGEIII_FILE <- file.path( "figures", "kmplot_misclass_stageIII.pdf" )
+COXPHMIC_PLOT_FILE <- file.path( "figures", "coxphMIC_plot.pdf" )
+COXPHMIC_HEATMAP_FILE <- file.path( "figures", "coxphMIC_heatmap.pdf" )
+COXPHMIC_11_GENES_BOXPLOT_TCGA_FILE <- file.path( "figures", "coxphMIC_11_genes_boxplots_TCGA.pdf" )
+KMPLOT_RAGx_RAG_0_OS_TCGA_FILE <- file.path( "figures", "kmplot_RAGx_RAG-0_OS_TCGA.pdf" )
+KMPLOT_RAS_INDEX_OS_TCGA_FILE <- file.path( "figures", "kmplot_ras_index_OS_TCGA.pdf" )
+KMPLOT_RAS_INDEX_KRASMUT_OS_TCGA_FILE <- file.path( "figures", "kmplot_ras_index_krasmut_OS_TCGA.pdf" )
+VOLCANO_UVCOX_PARENT_SIGS_TCGA_FILE <- file.path( "figures", "volcano_uvcox_parent_sigs_TCGA.pdf" )
+
+COXPHMIC_PLOT_UPSALA_FILE <- file.path( "figures", "coxphMIC_plot_UPPSALA.pdf" )
+UPPSALA_PARENT_SIGNATURE_OVERLAP_HEATMAP_FILE <- file.path( "figures", "uppsala_parent_siganture_class_overlap_heatmap.pdf" )
+KMPLOT_RAS_INDEX_UPPSALA_FILE <- file.path( "figures", "kmplot_ras_index_uppsala.pdf" )
+FOREST_PLOT_COXPH_MULTIVAR_UPPSALA_FILE <- file.path( "figures", "forestplot_coxph_multivar_uppsala.pdf" )
+COXPH_MULITVAR_PARENT_SIG_VOLCANO_PLOT_UPPSALA_FILE <- file.path( "figures", "coxph_multivar_parent_sig_volcano_uppsala.pdf" )
 ```
 
 # Introduction
@@ -96,17 +116,15 @@ of overall survival in these patients.
 Here we read in preprocessed LUAD data as a SummarizedExperiment object.
 
 ```{r data}
-se_t_file <- file.path( "data", "se_t.rds" )
-se_t <- readRDS( se_t_file )
-
-SIG_HOME <- file.path( "data", "signatures" )
-krasSigNames <- sub( "\\.csv", "", dir( SIG_HOME ) )
+se_t <- readRDS( TCGA_LUAD_RAS84_CLASS_SE_FILE )
+krasSigNames <- sub( "\\.csv", "", dir( RAS_SIG_HOME ) )
 signatures <- lapply( krasSigNames, function( sigFile ) {
-    read.table( file = file.path( SIG_HOME, paste( sigFile, "csv", sep = "." ) ),
+    read.table( file = file.path( RAS_SIG_HOME, paste( sigFile, "csv", sep = "." ) ),
                sep = "\t", stringsAsFactors = FALSE )[, 1 ]
-} ) %>% setNames( make.names( krasSigNames ) )
-RAS84_signature_map <- read.xlsx( file.path( "data", "RAS84_feature_map.xlsx" ) )
-signatures$RAS4 <- RAS84_signature_map$TCGA_gene_symbol
+} )
+names( signatures ) <- make.names( krasSigNames )
+ras84_map <- read.xlsx( RAS84_FEATURE_MAP_FILE )
+signatures$RAS84 <- ras84_map$TCGA_gene_symbol
 ```
 
 ## Survival analysis
@@ -135,9 +153,6 @@ colData( se_t ) <- pdat %>%
                         ifelse( grepl( "ii", tumour_stage ), "II",
                         ifelse( grepl( "i", tumour_stage ), "I", tumour_stage ) ) ) ) ) %>%
     DataFrame( row.names = .$rowname )
-
-write.xlsx( colData( se_t )[, c( "RAS84" , "ras_index", "MUT.KRAS", "OS", "OS.Time" ) ],
-           file = file.path( adat$analysis.path, "TCGA_LUAD_survival_data.xslx" ) )
 ```
 
 ## RAS-pathway vs RAS84 in the context of RAS-pathway
@@ -187,9 +202,7 @@ coxph( Surv( OS.Time, OS ) ~ Loboda_classified, misclass_df_plot )
 
 fit <- survfit( Surv( OS.Time/365*12, OS ) ~ Loboda_classified, misclass_df_plot )
 gg <- ggsurvplot( fit, data = misclass_df_plot )
-png( file = "kmplot_misclass_krasmutneg_df.png" )
-print( gg )
-dev.off()
+gg
 
 misclass_df_plot <- misclass_df %>%
     filter( stage_123 == "III" ) %>%
@@ -198,8 +211,7 @@ fit <- survfit( Surv( OS.Time/365*12, OS ) ~ stage_RAGclass, misclass_df_plot )
 gg <- ggsurvplot( fit, data = misclass_df_plot, pval = TRUE,
                  legend.labs = c( "different", "agreement") )
 
-cairo_pdf( file = "kmplot_misclass_stageIII_df.pdf",
-          width = 4, height = 4)
+cairo_pdf( file = KMPLOT_MISCLASS_STAGEIII_FILE, width = 4, height = 4)
 print( gg )
 dev.off()
 ```
@@ -232,7 +244,6 @@ misclass_df <- colData( se_t ) %>%
     unite( KRAS_RAGclass, MUT.KRAS, RAS84_classified, remove = FALSE ) %>%
     unite( sex_RAGclass, sex, RAS84_classified, remove = FALSE ) %>%
     unite( stage_RAGclass, stage_123, RAS84_classified, remove = FALSE ) %>%
-
     mutate( KRAS_RAGclass = factor( KRAS_RAGclass ) ) %>%
     mutate( KRAS_RAGclass = relevel( KRAS_RAGclass, "TRUE_FALSE" ) ) %>%
     mutate( stage_RAGclass = factor( stage_RAGclass ) ) %>%
@@ -283,10 +294,7 @@ surv_time_gg <- misclass_df %>%
     ggplot( aes( x = RAS84, y = surv_time, color = Loboda_classified ) ) +
     geom_boxplot( ) +
     facet_wrap( ~survival_type, ncol = 2 )
-
-png( file = file.path( "boxplots.png" ) )
 print( surv_time_gg )
-dev.off( )
 
 misclass_surv_RAG_0_df <- misclass_df %>%
     filter( RAS84 == "RAG-0" )
@@ -301,37 +309,7 @@ survplot_df <- misclass_df %>%
     filter( RAS84 %in% c( "RAG-0", "RAG-4" ) )
 fit <- survfit( Surv( OS.Time, OS ) ~ RAS84, survplot_df )
 gg <- ggsurvplot( fit, data = survplot_df )
-png( file = "kmplot_stageIII_RAS84.png" )
-print( gg )
-dev.off( )
-
-survplots_l <- map( c( "I", "II", "III" ), function( stage ) {
-    rag_l <- map( levels( misclass_df$Loboda ), function( rag ) {
-        survplot_df <- misclass_df %>%
-            filter( stage_123 == stage ) %>%
-            filter( Loboda == rag ) %>%
-            mutate( group = paste( Loboda, Loboda_classified, sep = "." ) )
-        fit <- survfit( Surv( OS.Time, OS ) ~ group, survplot_df )
-        ggsurvplot( fit, data = survplot_df, pval = TRUE )
-    } )
-    names( rag_l ) <- levels( misclass_df$Loboda )
-    rag_l
-} )
-names( survplots_l ) <- c( "I", "II", "III" )
-
-for( s in names( survplots_l ) ) {
-    for( rag in names( survplots_l[[ s ]] ) ) {
-        path <- file.path( adat$plot.path, paste0( "kmplot", s, "_", rag, "_RAS_pathway.png" ) )
-        png( file = path )
-        print( survplots_l[[ s ]][[ rag ]] )
-        dev.off( )
-    }
-}
-
-cairo_pdf( file = file.path( adat$plot.path, paste0( i, "_RGS-0_PFS_TCGA_KM.pdf" ) ),
-          width = 4, height = 4 )
-print( gg )
-dev.off()
+gg
 ```
 
 ## coxphMIC TCGA
@@ -359,8 +337,7 @@ surv_dat <- surv_dat %>%
 
 fit.mic <- coxphMIC( formula = Surv( OS.Time, OS )~.-barcode, data = surv_dat, method = "BIC" )
 
-cairo_pdf( file = file.path( adat$plot.path, "coxphMIC_plot.pdf" ),
-          width = 5, height = 3 )
+cairo_pdf( file = COXPHMIC_PLOT_FILE, width = 5, height = 3 )
 print( plot( fit.mic ) )
 dev.off( )
 
@@ -369,7 +346,6 @@ coxphMIC_genes <- fit.mic$result %>%
     rownames_to_column( var = "gene_symbols" ) %>%
     filter( !is.na( se.beta.MIC ) ) %>%
     pull( gene_symbols )
-saveRDS( coxphMIC_genes, file.path( adat$analysis.path, "coxphMIC_genes.rds" ) )
 
 hmcols <- colorpanel( 1000, "#4066AA", "white", "#E3001A" )
 hmmat <- assays( se_t )$vst - rowMedians( assays( se_t )$vst )
@@ -401,12 +377,9 @@ hm <- Heatmap( hmmat_gs,
               cluster_row_slices = FALSE,
               row_names_max_width = unit( 10, "mm" ) )
 
-cairo_pdf( file = file.path( adat$plot.path, "coxphMIC_11genes_heatmap.pdf" ),
-          width = 8, height = 3 )
+cairo_pdf( file = COXPHMIC_HEATMAP_FILE, width = 8, height = 3 )
 print( hm )
 dev.off( )
-
-write( coxphMIC_genes, file = file.path( adat$analysis.path, "coxphMIC_11genes.txt" ) )
 ```
 ```{r MIC_RI}
 ri_mic <- data.frame(
@@ -424,8 +397,7 @@ bw_gg <- ri_mic %>%
     plot_formatter() +
     theme( axis.text.x = element_text( angle = 90, vjust = 0.5, hjust =1 ) )
 
-cairo_pdf( file = file.path( adat$plot.path, "coxphMIC_11_genes_boxplots_TCGA.pdf" ),
-          width = 2, height = 3 )
+cairo_pdf( file = COXPHMIC_11_GENES_BOXPLOT_TCGA_FILE, width = 2, height = 3 )
 print( bw_gg )
 dev.off()
 ```
@@ -461,7 +433,6 @@ res <- map( coxph_fit_OS_sigs_l, function( fit ) {
     bind_rows( ) %>%
     mutate( signature = sub( "RAG-\\d", "", group ) ) %>%
     rename( pval = 2 )
-write.xlsx( res, file.path( adat$analysis.path, "coxph_fit_OS_allsigs.xlsx" ) )
 ```
 
 
@@ -506,7 +477,7 @@ for( i in levels(  se_t$RAS84 )[ -1 ] ) {
     gg <- ggsurvplot( fit, data = colData( se_t )[ f, ],
                      palette = c( my_blue, my_red ), pval = TRUE )
     print( gg )
-    cairo_pdf( file = file.path( adat$plot.path, paste0( i, "_RGS-0_OS_TCGA_KM.pdf" ) ),
+    cairo_pdf( file = sub( "RAGx", i, KMPLOT_RAGx_RAG_0_OS_TCGA_FILE ),
               width = 4, height = 4 )
     print( gg )
     dev.off()
@@ -553,8 +524,7 @@ gg <- ggsurvplot( surv_l,
                  combine = TRUE,
                  palette = c( my_grey, my_red, my_blue ) )
 print( gg )
-cairo_pdf( file = file.path( adat$plot.path, "ras_index_OS_TCGA_KM.pdf" ),
-          width = 4, height = 4 )
+cairo_pdf( file = KMPLOT_RAS_INDEX_OS_TCGA_FILE, width = 4, height = 4 )
 print( gg )
 dev.off( )
 ```
@@ -587,8 +557,7 @@ coxph_fit_OS_rasindex_krasmut_tcga <- coxph( Surv( OS.Time, OS ) ~ rasindex_kras
 fit <- survfit( Surv( OS.Time/365*12, OS ) ~ ri_kras, colData( se_t ) )
 gg <- ggsurvplot( fit, data = colData( se_t ), pval = TRUE )
 
-cairo_pdf( file = file.path( adat$plot.path, "ras_index_krasmut_OS_TCGA_KM.pdf" ),
-           width = 5, height = 5 )
+cairo_pdf( file = KMPLOT_RAS_INDEX_KRASMUT_OS_TCGA_FILE, width = 5, height = 5 )
 print( gg )
 dev.off( )
 ```
@@ -600,8 +569,7 @@ RAS signatures used to derive RAS84 which was used to drive the RSGs
 and RSI usng here.
 
 ```{r survival_parent_sigs}
-parent_sigs <- c( "Bild.Nevins", "KRAS_msigdb_HM",
-                  "Loboda", "SweetCordero", "RAS84" )
+parent_sigs <- c( "HRAS", "KRASG13D134", "KrasLA", "MSigDB", "RAS_pathway" )
 
 uvsur_res_l <- map( parent_sigs, function( s ) {
     coxph( as.formula( paste( "Surv( OS.Time, OS ) ~",  s ) ), colData( se_t ) )
@@ -628,8 +596,7 @@ uvsurv_gg <- ggplot( plotdat,
     plot_formatter( )
 
 print( mv_surv_gg )
-cairo_pdf( file = file.path( adat$plot.path, "uvcox_parent_sigs_volcano.pdf" ),
-           width = 5, height = 4 )
+cairo_pdf( file = VOLCANO_UVCOX_PARENT_SIGS_TCGA_FILE, width = 5, height = 4 )
 print( uvsurv_gg )
 dev.off( )
 ```
@@ -640,22 +607,11 @@ dev.off( )
  
 Fresh frozen tumor tissue from 199 patients diagnosed with NSCLC and surgically treated 2006-2010 at the Uppsala University Hospital, Uppsala, Sweden and 19 paired normal lung tissues. Clinical data were retrieved from the regional lung cancer registry
 
-First we load signature gene lists so we can classify the Uppsala data.
-
-```{r signatures}
-SIG_HOME <- file.path( "..", "..", "data", "signatures", "ras", "active" )
-signatures_raw <- init.signatures()
-
-load( file = file.path( "..", "..", "analysis", "validate_signatures", "CCLE", "LUNG", "signatures_filtered.rda" ) )
-
-signatures_raw$RAS84 <- signatures$RAS84
-```
-
 Here we read in the Uppsala expression and clinical data and create a
 SummarizedExperiment object. Annotation is obtained form BioMart.
 
 ```{r uppsala,fig.width=4,fig.height=3}
-se_uppsala <- readRDS( file = file.path( "data" "GSE81089_se.rds" )
+se_uppsala <- readRDS( file = UPPSALA_SE_FILE )
 ```
 
 ## Survival data
@@ -725,7 +681,6 @@ annotation to RAS84.
 * CXCL8 -> IL8
 * ITPRID2 -> SSFA2
 
-We change the Uppsala annotation to make it compatible with RAS84.
 
 IER3 maps to multiple features in the Uppsala annotation. We select
 ENSG00000137331 as the primary feature for IER3.
@@ -766,8 +721,7 @@ surv_dat <- surv_dat %>%
 
 fit.mic <- coxphMIC( formula = Surv( OS_time, OS )~.-title, data = surv_dat, method = "BIC" )
 
-cairo_pdf( file = file.path( adat$plot.path, "coxphMIC_plot_uppsala.pdf" ),
-          width = 5, height = 3 )
+cairo_pdf( file = COXPHMIC_PLOT_UPSALA_FILE, width = 5, height = 3 )
 print( plot( fit.mic ) )
 dev.off( )
 
@@ -866,12 +820,8 @@ hm_dat <- RSG_df %>%
 hm <- Heatmap( hm_dat,
               name = "Overlap", 
               clustering_method_rows = "ward.D2",
-              #clustering_method_columns = "ward.D2",
               show_column_names = TRUE,
               col = c( "grey" , "darkgreen", "purple", "orange", "black" ),
-              #colorRamp2(
-              #    seq( from = -2, to = 2, length.out = length( hmcols ) ),
-              #    hmcols ),
               row_split = hm_dat$RAS84,
               column_split = factor( colnames( hm_dat ), levels = colnames( hm_dat ) ),
               column_title = sig_n,
@@ -880,14 +830,12 @@ hm <- Heatmap( hm_dat,
               heatmap_legend_param = list( title_gp = gpar( fontsize = 14 ),
                                           labels_gp = gpar( fontsize = 12 ) ),
               show_heatmap_legend = TRUE,
-              #cluster_row_slices = FALSE,
               row_names_max_width = unit( 10, "mm" ) )
 png( file = "test_hm.png", width = 300 )
 print( hm )
 dev.off( )
 
-cairo_pdf( file = file.path( adat$plot.path, "signature_class_overlap.pdf" ),
-          width = 4 )
+cairo_pdf( file = UPPSALA_PARENT_SIGNATURE_OVERLAP_HEATMAP_FILE, width = 4 )
 print( hm )
 dev.off( )
 ```
@@ -974,8 +922,7 @@ gg <- ggsurvplot( surv_l,
 print( gg )
 ```
 ```{r render_km_rasindex_uppsala,echo=FALSE,results='hide'}
-cairo_pdf( file = file.path( adat$plot.path, "ras_index_uppsalas_KM.pdf" ),
-          width = 4, height = 4 )
+cairo_pdf( file =KMPLOT_RAS_INDEX_UPPSALA_FILE, width = 4, height = 4 )
 print( gg )
 dev.off( )
 ```
@@ -986,8 +933,7 @@ Here we run a univariate survival analysis against the RSGs derived from the
 parent signatures.
 
 ```{r uv_uppsala_parent_sigs}
-parent_sigs <- c( "Bild.Nevins", "Downward_134", "KRAS_msigdb_HM",
-                  "Loboda", "SweetCordero", "RAS84" )
+parent_sigs <- c( "HRAS", "KRASG13D134", "KrasLA", "MSigDB", "RAS_pathway" )
 
 uvsur_uppsala_res_l <- map( parent_sigs, function( s ) {
     coxph_fit_rasact <- coxph( as.formula( paste( "Surv( OS_time, OS ) ~",  s ) ), colData( se_uppsala ) )
@@ -1097,7 +1043,7 @@ print( gg )
 ```
 
 ```{r render_mv_forest_plot,results='hide'}
-cairo_pdf( file = file.path( adat$plot.path, "multivar.pdf" ), width = 6, height = 3 )
+cairo_pdf( file = FOREST_PLOT_COXPH_MULTIVAR_UPPSALA_FILE, width = 6, height = 3 )
 print( gg )
 dev.off( )
 ```
@@ -1136,8 +1082,7 @@ mv_surv_gg <- ggplot( plotdat,
     plot_formatter( )
 
 print( mv_surv_gg )
-cairo_pdf( file = file.path( adat$plot.path, "mvcox_parent_sigs_volcano.pdf" ),
-          width = 5, height = 4 )
+cairo_pdf( file = COXPH_MULITVAR_PARENT_SIG_VOLCANO_PLOT_UPPSALA_FILE, width = 5, height = 4 )
 print( mv_surv_gg )
 dev.off( )
 ```
