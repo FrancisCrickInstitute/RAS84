@@ -1,15 +1,16 @@
+
 library( DESeq2 )
 library( tidyverse )
 library( biomaRt )
 library( openxlsx )
 
-CCLE_RNASEQ_DAT_FILE <- file.path( "..", "downloads", "CCLE_RNAseq_rsem_genes_tpm_20180929.txt.gz" )
-CCLE_MUTATIONS_FILE <- file.path( "..", "downloads", "CCLE_DepMap_18q3_maf_20180718.txt" )
-CCLE_RNASEQ_SE_FILE <- file.path( "..", "objects", "ccle_rnaseq_se.rda" ) 
-RAS_PATHWAY_DEF_FILE <- file.path( "..", "downloads", "1-s2.0-S0092867418303593-mmc3.xlsx" )
-CELL_DRIVER_MUTATION_FILE <- file.path( "..", "downloads", "1-s2.0-S009286741830237X-mmc1.xlsx" )
+CCLE_RNASEQ_DAT_FILE <- file.path( "data", "downloads", "CCLE_RNAseq_rsem_genes_tpm_20180929.txt.gz" )
+CCLE_MUTATIONS_FILE <- file.path( "data", "downloads", "CCLE_DepMap_18q3_maf_20180718.txt" )
+CCLE_RNASEQ_SE_FILE <- file.path( "data", "objects", "ccle_rnaseq_se.rda" ) 
+RAS_PATHWAY_DEF_FILE <- file.path( "data", "downloads", "1-s2.0-S0092867418303593-mmc3.xlsx" )
+CELL_DRIVER_MUTATION_FILE <- file.path( "data", "downloads", "1-s2.0-S009286741830237X-mmc1.xlsx" )
 
-rasPathwayTab <- read.xlsx( RAS_PATHWAY_DEF_FILE, sheet = 8 )
+rasPathwayTab <- read.xlsx( RAS_PATHWAY_DEF_FILE, sheet = 8, check.names = TRUE )
 rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
                     tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
 rasGeneSets <- lapply( rasGeneSets, as.character )
@@ -28,11 +29,12 @@ rnaseq_dat <- read.delim( CCLE_RNASEQ_DAT_FILE ) %>%
 ## Gene annotation
 row_dat <- rnaseq_dat %>%
         dplyr::select( gene_id, ensembl_gene_id, ensembl_id_version )
-ensembl <- useMart( "ensembl", dataset = "hsapiens_gene_ensembl" )
+ensembl <- useMart( biomart = "ensembl", dataset = "hsapiens_gene_ensembl" )
 ensembl_dat <- getBM( attributes = c( "ensembl_gene_id", "external_gene_name", "entrezgene_id" ),
                       filters = "ensembl_gene_id",
                       values = row_dat$ensembl_gene_id,
-                      mart = ensembl )
+                     mart = ensembl,
+                     useCache = FALSE )
 ensembl_dat <- ensembl_dat %>%
         filter( !duplicated( ensembl_gene_id ) )
 row_dat <- row_dat %>%

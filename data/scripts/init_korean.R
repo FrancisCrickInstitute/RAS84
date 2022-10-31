@@ -7,16 +7,16 @@ library( DT )
 library( ggrepel )
 library( openxlsx )
 
-KOREAN_EXPRESSION_FILE <- file.path( "..", "objects", "eSet_korean.rds"
-KOREAN_EXPRESSION_DATA_FILE <- file.path( "..", "downloads", "GSE40419_LC-87_RPKM_expression.txt" )
-KOREAN_MUTATION_DATA_FILE <- file.path( "..", "downloads", "SuppTable3.xlsx" )
+KOREAN_EXPRESSION_FILE <- file.path( "data", "objects", "eSet_korean.rds" )
+KOREAN_EXPRESSION_DATA_FILE <- file.path( "data", "downloads", "GSE40419_LC-87_RPKM_expression.txt" )
+KOREAN_MUTATION_DATA_FILE <- file.path( "data", "downloads", "SuppTable3.xls" )
 
 eset_gse40419_l <- getGEO( 'GSE40419', GSEMatrix = TRUE )
 eset_geo <- eset_gse40419_l[[ 1 ]]
 eset_geo$title <- as.character( eset_geo$title )
-mut_dat <- read.xlsx( KOREAN_MUTATION_DATA_FILE,
+mut_dat <- read_excel( KOREAN_MUTATION_DATA_FILE,
                      sheet = 3,
-                     startRow = 2 ) %>%
+                     skip = 1 ) %>%
     filter( Gene %in% c( "TP53", "EGFR", "KRAS" ) ) %>%
     select( -2 ) %>%
     gather( sample_id, value, -Gene ) %>%
