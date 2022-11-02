@@ -6,6 +6,9 @@ library( GEOquery )
 library( DT )
 library( ggrepel )
 library( openxlsx )
+library( readxl )
+
+Sys.setenv( VROOM_CONNECTION_SIZE = 2000000 )
 
 KOREAN_EXPRESSION_FILE <- file.path( "data", "objects", "eSet_korean.rds" )
 KOREAN_EXPRESSION_DATA_FILE <- file.path( "data", "downloads", "GSE40419_LC-87_RPKM_expression.txt" )
