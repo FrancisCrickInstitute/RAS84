@@ -1,30 +1,26 @@
 
 library( TCGAbiolinks, quietly = TRUE  )
+library( biomaRt )
 library( vsn, quietly = TRUE )
 library( DESeq2, quietly = TRUE )
 library( limma, quietly = TRUE )
 library( tibble, quietly = TRUE )
 library( dplyr, quietly = TRUE )
-
+library( openxlsx )
 
 ## Paths
-OBJECT_PATH <- file.path( "..", "objects" )
+OBJECT_PATH <- file.path( "data", "objects" )
 
 ## Dependent data sources
 
 ## Sanchez et al. oncogenic RAS pathway definition
-RAS_PATHWAY_DEFINITION_FILE <- file.path( "..",
-                                         "downloads",
-                                         "oncogenic_RAS_pathway_defintions_Sanchez-Vega_etal.txt" )
+RAS_PATHWAY_DEF_FILE <- file.path( "data", "downloads", "1-s2.0-S0092867418303593-mmc3.xlsx" )
 
 ## Oncogenic alternation data
-ONCOGENIC_ALTERATIONS_TCGA_PANCANCER_FILE <- file.path( "..",
-                                                       "downloads",
-                                                       "oncogenic_pathway_alteration_level_TCGA.txt" )
-
+ONCOGENIC_PATHWAY_ALTERATIONS_FILE <- file.path( "data", "downloads", "1-s2.0-S0092867418303593-mmc4.xlsx" )
 
 ## Cell TCGA immune landscape data
-IMMUNE_LANDSCAPE_DATA_FILE <- file.path( "..",
+IMMUNE_LANDSCAPE_DATA_FILE <- file.path( "data",
                                         "downloads",
                                         "1-s2.0-S1074761318301213-mmc2.xlsx" )
 
@@ -46,6 +42,8 @@ GDCdownload( query_rnaseq, method = "api" )
 se <- GDCprepare( query = query_rnaseq,
                   summarizedExperiment = TRUE )
 saveRDS( se, file.path( OBJECT_PATH, paste0( "se_", tumour, ".rds" ) ) )
+
+load( "../../data/GDCdata/GDCdata/TCGA-LUAD/legacy/Gene_expression/se_TCGA-LUAD.RNA-Seq.legacy.biolinks.rda" )
 
 ## - Rename assays slots for DESeq2 compatibility
 names( assays( se ) ) <- c( "counts", "scaled_estimate" )
@@ -71,25 +69,30 @@ se$pancan_pathway <- sub( "[AB]$", "", se$sample )
 se$tumour_normal <- "tumour"
 se$tumour_normal[ se$definition %in% "Solid Tissue Normal" ] <- "normal"
 
+
 ## Select tumour samples
 se_t <- se[ ,!se$definition %in% "Solid Tissue Normal" ]
 
 ## Load oncogenic-RAS pathway definition
-rasPathwayTab <- read.delim( file = RAS_PATHWAY_DEFINITION_FILE, sep = "\t" )
+rasPathwayTab <- read.xlsx( RAS_PATHWAY_DEF_FILE, sheet = 8, check.names = TRUE )
 rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
                     tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
 rasGeneSets <- lapply( rasGeneSets, as.character )
+ras_pathway_genes <- unlist( rasGeneSets )
 
-## - Load oncogenic pathway alteration data
-alt_altDat <- read.table( file = ONCOGENIC_ALTERATIONS_TCGA_PANCANCER_FILE,
-                          header = TRUE, sep = "\t" )
-colnames( alt_altDat )[ 1 ] <- "pancan_pathway"
+## - Load and add oncogenic pathway alteration data
+alt_altDat <- read.xlsx( ONCOGENIC_PATHWAY_ALTERATIONS_FILE, sheet = 1, startRow = 3 )
+
+df <- colData( se_t ) %>%
+    as.data.frame( ) %>%
+    left_join( alt_altDat, by = c( "pancan_pathway" = "SAMPLE_BARCODE" ) )
+colData( se_t ) <- DataFrame( df, row.names = df$rowname )
 
 ## Identify RAS pathway alterations
 alt_genes <- sapply( strsplit( colnames( alt_altDat )[ -1 ], "\\." ), '[[', 2 )
 rasAlts_f <- alt_genes %in% unlist( rasGeneSets )
 rasAlts <- colnames( alt_altDat )[ -1 ][ rasAlts_f ]
-rasAlts <- rasAlts[ colSums( as.matrix( colData( se_t )[, rasAlts ] ) ) > 0 ]
+rasAlts <- rasAlts[ colSums( as.matrix( colData( se_t )[, rasAlts ] ), na.rm = TRUE ) > 0 ]
 
 ## Identify RAS pathway alterations
 onco_ras_labels <- colData( se_t ) %>%
@@ -109,9 +112,9 @@ df <- colData( se_t ) %>%
 colData( se_t ) <- DataFrame( df, row.names = df$rowname )
 
 ## Load TCGA PanCancer immune landscape paper metrics
-cell_imm_lscape_dat <- read.table( file = IMMUNE_LANDSCAPE_DATA_FILE,
-                                  sep = "\t",
-                                  header = TRUE )
+cell_imm_lscape_dat <- read.xlsx( IMMUNE_LANDSCAPE_DATA_FILE )
+dup_colnames_f <- colnames( cell_imm_lscape_dat ) %>% duplicated()
+colnames( cell_imm_lscape_dat )[ dup_colnames_f ] <- paste0( colnames( cell_imm_lscape_dat )[ dup_colnames_f ], "_2" )
 
 ## Add immune landscape data to tumour SE object
 df <- colData( se_t ) %>%
