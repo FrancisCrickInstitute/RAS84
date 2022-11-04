@@ -93,9 +93,8 @@ plot_formatter <- function() {
 ## Paths
 ESET_CCLE_AFFY_LUNG_FILE <- file.path( "data", "objects", "eset_ccle_affy_lung.rds" )
 RAS_SIG_HOME <- file.path( "data", "resources", "signatures", "ras" )
-RAS_PATHWAY_DEFINITION_FILE <- file.path( "data",
-                                         "downloads",
-                                         "oncogenic_RAS_pathway_defintions_Sanchez-Vega_etal.txt" )
+RAS_PATHWAY_DEFINITION_FILE <- file.path( "data", "downloads", "1-s2.0-S0092867418303593-mmc3.xlsx" )
+
 RAS84_FEATURE_MAP_FILE <- file.path( "data", "resources", "RAS84_feature_map.xlsx" )
 CONTROL_SIGNATURE_HOME <- file.path( "data", "resources", "signatures", "controls" )
 
@@ -159,9 +158,9 @@ filter cells for oncogenic RAS signaling activity driven by pathway
 members other than RAS
 
 ```{r ras_pathway}
-rasPathwayTab <- read.delim( file = RAS_PATHWAY_DEFINITION_FILE, sep = "\t" )
+rasPathwayTab <- read.xlsx( RAS_PATHWAY_DEFINITION_FILE, sheet = 8, check.names = TRUE )
 rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
-                     tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
+                    tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
 rasGeneSets <- lapply( rasGeneSets, as.character )
 ```
 

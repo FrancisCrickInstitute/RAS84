@@ -71,9 +71,8 @@ plot_formatter <- function() {
 GDSC_SE_L_FILE <- file.path( "data", "gdsc_se_l.rds" )
 RAS_SIG_HOME <- file.path( "data", "resources", "signatures", "ras" )
 RAS84_FEATURE_MAP_FILE <- file.path( "data", "resources", "RAS84_feature_map.xlsx" )
-RAS_PATHWAY_DEFINITION_FILE <- file.path( "data",
-                                         "downloads",
-                                         "oncogenic_RAS_pathway_defintions_Sanchez-Vega_etal.txt" )
+RAS_PATHWAY_DEFINITION_FILE <- file.path( "data", "downloads", "1-s2.0-S0092867418303593-mmc3.xlsx" )
+
 ESET_CCLE_AFFY_LUNG_FILE <- file.path( "data", "objects", "eset_ccle_affy_lung.rds" )
 RAS84_HIGH_LOW_GDSC_CCLE_SIG_COMPOUNDS_FILE <- file.path( "data", "RAS84_HighvLow_CCLE_GDSC_sig_compounds.xlsx" )
 
@@ -263,7 +262,7 @@ The data reports mutations at the transcript level so gene level
 annotation was obtained from Ensembl and the data collapsed to the gene level.
 
 ```{r setup_se}
-rasPathwayTab <- read.delim( file = RAS_PATHWAY_DEFINITION_FILE, sep = "\t" )
+rasPathwayTab <- read.xlsx( RAS_PATHWAY_DEFINITION_FILE, sheet = 8, check.names = TRUE )
 rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
                     tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
 rasGeneSets <- lapply( rasGeneSets, as.character )

@@ -88,12 +88,6 @@ plot_formatter <- function() {
 TCGA_PANCANCER_SE_FILE <- file.path( "data", "TCAG_PANCANCER_SE.rds" )
 RAS_SIG_HOME <- file.path( "data", "resources", "signatures", "ras" )
 RAS84_FEATURE_MAP_FILE <- file.path( "data", "resources", "RAS84_feature_map.xlsx" )
-RAS_PATHWAY_DEFINITION_FILE <- file.path( "data",
-                                         "downloads",
-                                         "oncogenic_RAS_pathway_defintions_Sanchez-Vega_etal.txt" )
-ONCOGENIC_PATHWAY_ALTERATIONS_FILE <- file.path( "data",
-                                                "downloads",
-                                                "oncogenic_pathway_alteration_level_TCGA.txt" )
 
 ## figures
 PANCANCER_VIOLIN_PLOT_FILE <- file.path( "figures", "pancancer_violin_plot.pdf" )
@@ -127,20 +121,6 @@ signatures <- lapply( krasSigNames, function( sigFile ) {
 names( signatures ) <- make.names( krasSigNames )
 ras84_map <- read.xlsx( RAS84_FEATURE_MAP_FILE )
 signatures$RAS84 <- ras84_map$TCGA_gene_symbol
-
-rasPathwayTab <- read.delim( file = RAS_PATHWAY_DEFINITION_FILE, sep = "\t" )
-rasGeneSets <- list( og = subset( rasPathwayTab, OG.TSG == "OG" )$Gene,
-                    tsg = subset( rasPathwayTab, OG.TSG == "TSG" )$Gene )
-rasGeneSets <- lapply( rasGeneSets, as.character )
-
-alt_altDat <- read.table( file = ONCOGENIC_PATHWAY_ALTERATIONS_FILE, header = TRUE, sep = "\t" )
-colnames( alt_altDat )[ 1 ] <- "pancan_pathway"
-
-## identify RAS pathway alterations
-alt_genes <- sapply( strsplit( colnames( alt_altDat )[ -1 ], "\\." ), '[[', 2 )
-rasAlts_f <- alt_genes %in% unlist( rasGeneSets )
-rasAlts <- colnames( alt_altDat )[ -1 ][ rasAlts_f ]
-rasAlts <- rasAlts[ colSums( as.matrix( colData( se_t )[, rasAlts ] ) ) > 0 ]
 
 ## identify RAS pathway alterationssage=FALSE,warning=FALSE}
 sig_f <- rowData( se_pc )$gene_id %in% signatures$RAS84

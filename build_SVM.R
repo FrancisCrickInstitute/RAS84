@@ -28,39 +28,16 @@ library( grid )
 library( gridExtra )
 library( fastAdaboost )
 library( tidyverse )
-
-source( "/camp/stp/babs/working/eastp/code/R/R.packages.east01.functions.R")
-source( "scripts/lib.Ras_HighLow.335.R" )
-source( "scripts/lib.CCLE.335.R" )
-
-my_grey <- "#707173"
-my_red <- "#e3001a"
-my_orange <- "#f6ad6e"
-my_green <- "#7ab51d"
-my_lightgreen <- "#adcf82"
-my_purple <- "#bb90bd"
-my_blue <- "#4066aa"
-
-plot_formatter <- function() {
-    theme_bw( ) +
-        theme( panel.grid.major = element_blank( ),
-               panel.grid.minor = element_blank( ),
-               panel.border = element_blank( ),
-               panel.background = element_blank( ),
-               axis.line = element_line(color = "black"),
-               axis.line.x = element_line(color="black", size = 0.1 ),
-               axis.line.y = element_line(color="black", size = 0.1 ),
-               text = element_text( size = 12 ) )
-}
+library( openxlsx )
 
 tumour <- "LUAD"
-adat <- project.init( file.path( "RAS_short_signature", "TCGA", tumour ) )
 
 ## - load classified tumour samples
-se_t_file <- file.path( "data", "LUAD_se_t_rasclass.rds" )
+se_t_file <- file.path( "data", "objects", "TCGA_LUAD_RAS84_class_se_t.rds" )
 se_t <- readRDS( se_t_file )
 
-ras84_map <- read.xlsx( file.path( "data", "RAS84_feature_map.xlsx" ) )
+RAS84_FEATURE_MAP_FILE <- file.path( "data", "resources", "RAS84_feature_map.xlsx" )
+ras84_map <- read.xlsx( RAS84_FEATURE_MAP_FILE )
 sig_f <- rowData( se_t )$gene_id %in% ras84_map$TCGA_feature_id
 se_t_ras84 <- se_t[ sig_f, ]
 
@@ -83,10 +60,6 @@ pw_ras84_gene_cor_gg <- data.frame( pw_cor = as.numeric( cor_mat[ upper.tri( cor
     geom_density( ) +
     labs( x = "RAS84 gene Pearson coefficients" ) +
     plot_formatter( )
-cairo_pdf( file = file.path( adat$plot.path, "pw_ras84_gene_cor_gg.pdf" ),
-          width = 3, height = 3)
-print( pw_ras84_gene_cor_gg )
-dev.off()
 
 ## Max abs correlation coefficient per gene
 cor_mat[ cor_mat == 1 ] <- 0
@@ -99,11 +72,6 @@ max_ras84_gene_cor_gg <- data.frame( max_abs_cor_coef = max_abs_cor_coef ) %>%
     lims( x = c( -1, 1 ) ) +
     labs( x = "Maximum RAS84 gene Pearson coefficient per-gene" ) +
     plot_formatter( )
-
-cairo_pdf( file = file.path( adat$plot.path, "max_ras84_gene_cor_gg.pdf" ),
-          width = 3, height = 3)
-print( max_ras84_gene_cor_gg )
-dev.off()
 
 ## - identify highly correlated genes
 high_cor <- findCorrelation( cor_mat, cutoff = 0.75, verbose = TRUE )
@@ -146,25 +114,19 @@ if( file.exists( train_test_dat_l_file ) ) {
 ## - repeats: For repeated k-fold cross-validation only: the number of
 ## complete sets of folds to compute
 
-rfe_file <- file.path( adat$analysis.path, "rfe_res_l_84.rda" )
-if( file.exists( rfe_file ) ) {
-    load( file = rfe_file )
-} else {
-    rfe_funcs_l <- list( rf = rfFuncs, nb = nbFuncs, treebag = treebagFuncs )
-    rfe_res_l <- lapply( names( rfe_funcs_l )[ 1 ], function( func_n ) {
-        print( func_n )
-        set.seed( 100 )
-        rfe_control <- rfeControl( functions = rfe_funcs_l[[ func_n ]],
-                                  method = "repeatedcv",
-                                  number = 10,
-                                  repeats = 5 )
-        rfe( model_dat[ , -1 ], model_dat$condition,
-            sizes = 1:84,
-            rfeControl = rfe_control )
-    } )
-    names( rfe_res_l ) <- names( rfe_funcs_l )[ 1 ]
-    save( rfe_res_l, file = rfe_file )
-}
+rfe_funcs_l <- list( rf = rfFuncs, nb = nbFuncs, treebag = treebagFuncs )
+rfe_res_l <- lapply( names( rfe_funcs_l )[ 1 ], function( func_n ) {
+    print( func_n )
+    set.seed( 100 )
+    rfe_control <- rfeControl( functions = rfe_funcs_l[[ func_n ]],
+                              method = "repeatedcv",
+                              number = 10,
+                              repeats = 5 )
+    rfe( model_dat[ , -1 ], model_dat$condition,
+        sizes = 1:84,
+        rfeControl = rfe_control )
+} )
+names( rfe_res_l ) <- names( rfe_funcs_l )[ 1 ]
 
 res <- rfe_res_l$rf
 
@@ -187,7 +149,6 @@ models <- list()
 ## define training parameters
 tr_control <- trainControl( method = "cv", number = 10  )
 
-svm_rfgenes_file <- file.path( adat$analysis.path, "svm_rfgenes.rda" )
 svm_models_l <- lapply( 2:81, function( i ) {
     print( i )
     training_genes <- predictors( res )[ 1:i ]
@@ -217,9 +178,8 @@ svm_models_l <- lapply( 2:81, function( i ) {
 } )
 
 names( svm_models_l ) <- as.character( 2:81 )
-saveRDS( svm_models_l, file = svm_rfgenes_file )
 
-svm_models_l <- readRDS( file = svm_rfgenes_file )
+vm_models_l <- readRDS( file = svm_rfgenes_file )
 svm_models_l <- svm_models_l[ !names( svm_models_l ) %in% c( "1", "2", "3", "4", "5" ) ]
 
 accuracy_df <- map( svm_models_l, function( l ) {
@@ -253,11 +213,6 @@ accuracy_gg <- accuracy_df %>%
     labs( x = "RF gene rank count", y = "model performance" ) +
     plot_formatter( )
 
-cairo_pdf( file = file.path( adat$plot.path, "model_performance.pdf" ),
-          width = 5.5, height = 3 )
-print( accuracy_gg )
-dev.off( )
-
 byClass_df <- map( svm_models_l, function( l ) {
     l$cm_test$byClass %>%
         as.data.frame( ) %>%
@@ -282,8 +237,3 @@ data <- filter( byClass_df, metric == "Sensitivity" & RAG == "Class: RAG-0" ) %>
     mutate( rfgene_rank = as.numeric( rfgene_rank ) )
 loess_fit <- loess( value ~ rfgene_rank, data = data )
 predict( loess_fit, 43 )
-
-cairo_pdf( file = file.path( adat$plot.path, "model_performance_byClass.pdf" ),
-          width = 7, height = 3 )
-print( byClass_gg )
-dev.off( )

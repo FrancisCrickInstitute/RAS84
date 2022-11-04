@@ -70,9 +70,6 @@ plot_formatter <- function() {
 TCGA_LUAD_RAS84_CLASS_SE_FILE <- file.path( "data", "objects", "TCGA_LUAD_RAS84_class_se_t.rds" )
 RAS_SIG_HOME <- file.path( "data", "resources", "signatures", "ras" )
 RAS84_FEATURE_MAP_FILE <- file.path( "data", "resources", "RAS84_feature_map.xlsx" )
-RAS_PATHWAY_DEFINITION_FILE <- file.path( "data",
-                                         "downloads",
-                                         "oncogenic_RAS_pathway_defintions_Sanchez-Vega_etal.txt" )
 UPPSALA_SE_FILE <- file.path( "data", "objects", "UPPSALA_se.rds" )
 
 ## figures
